@@ -49,7 +49,7 @@ def siaas_agent():
         ip = request.remote_addr
     ret_code = 200
     module = request.args.get('module', default='*', type=str)
-    all_existing_modules = "platform,neighborhood,portscanner,config"
+    all_existing_modules = "platform,neighborhood,portscanner,webscanner,metasploit,config" #webscanner and metaploit added
     for m in module.split(','):
         if m.strip() == "*":
             module = all_existing_modules

@@ -30,6 +30,8 @@ if __name__ == "__main__":
     import siaas_platform
     import siaas_portscanner
     import siaas_routes
+    #import siaas_metasploit #metasplit added
+    import webscanner #webscanner added
 
     print('\n')
 
@@ -107,6 +109,8 @@ if __name__ == "__main__":
     neighborhood = Process(target=siaas_neighborhood.loop, args=())
     portscanner = Process(target=siaas_portscanner.loop, args=())
     datatransfer = Process(target=siaas_datatransfer.loop, args=())
+    webscanner = Process(target=webscanner.loop, args=()) #added webscanner
+    #metasploit = Process(target=siaas_metasploit.loop, args=()) #added metaploit
 
     platform.start()
     # give the platform module some seconds to grab system info
@@ -116,6 +120,8 @@ if __name__ == "__main__":
     time.sleep(15)
     neighborhood.start()
     portscanner.start()
+    webscanner.start() #added webscanner
+    #metasploit.start() #added metasploit
 
     # give the modules some time to start before launching the local API
     time.sleep(5)
@@ -131,6 +137,8 @@ if __name__ == "__main__":
     platform.join()
     neighborhood.join()
     portscanner.join()
+    webscanner.join() #webscanner added
+    #metasploit.join() #metasploit added
     datatransfer.join()
 
 sys.exit(0)
