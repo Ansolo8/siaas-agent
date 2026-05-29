@@ -21,3 +21,13 @@ __
  - Generate a project archive (it is recommended to stop all processes before): `sudo ./siaas_agent_archive.sh`
 
  - Remove: `sudo ./siaas_agent_remove.sh`
+
+## Added modules
+
+This agent can now run three optional extension modules that keep the same local JSON database and data-transfer architecture as the original SIAAS modules:
+
+- `aiaavsraw_webscanner.py` writes OWASP ZAP web scan output to `var/webscanner.db`.
+- `siaas_metasploit.py` writes defensive Metasploit correlation output to `var/metasploit.db`. It correlates CVEs, services, and products from scanner evidence with local Metasploit module candidates when `metasploit_enable_msfconsole_search=true`; it does **not** execute exploits or payloads.
+- `siaas_remediation.py` writes an AI-style remediation report to `var/remediation.db` by consuming the port scanner, web scanner, and Metasploit assistant outputs.
+
+The data-transfer and internal API module list includes `platform`, `neighborhood`, `portscanner`, `webscanner`, `metasploit`, `remediation`, and `config`, so server-side consumers can ingest the new module outputs without changing the agent upload endpoint.

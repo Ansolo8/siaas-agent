@@ -31,7 +31,7 @@ paths:
             type: array
             items:
               type: string
-              enum: ["platform","neighborhood","portscanner","config","*"]
+              enum: ["platform","neighborhood","portscanner","webscanner","metasploit","remediation","config","*"]
             default: ["*"]
           #example: ["neighborhood","portscanner"] # comment to avoid: https://github.com/swagger-api/swagger-ui/issues/5776
       responses:
