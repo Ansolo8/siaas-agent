@@ -26,7 +26,7 @@ def upload_agent_data(api_base_uri, last_uploaded_dict=None, ignore_ssl=False, c
 
     siaas_uid = siaas_aux.get_or_create_unique_system_id()
 
-    all_modules = "platform,neighborhood,portscanner,config"
+    all_modules = "platform,neighborhood,portscanner,webscanner,config" #added webscanner
 
     if silent or first_run:
         modules_to_send = "platform,config"

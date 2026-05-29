@@ -30,6 +30,7 @@ if __name__ == "__main__":
     import siaas_platform
     import siaas_portscanner
     import siaas_routes
+    import aiaavsraw_webscanner #webscanner added
 
     print('\n')
 
@@ -107,6 +108,7 @@ if __name__ == "__main__":
     neighborhood = Process(target=siaas_neighborhood.loop, args=())
     portscanner = Process(target=siaas_portscanner.loop, args=())
     datatransfer = Process(target=siaas_datatransfer.loop, args=())
+    webscanner = Process(target=aiaavsraw_webscanner.loop, args=()) #added webscanner
 
     platform.start()
     # give the platform module some seconds to grab system info
@@ -116,6 +118,7 @@ if __name__ == "__main__":
     time.sleep(15)
     neighborhood.start()
     portscanner.start()
+    webscanner.start() #added webscanner
 
     # give the modules some time to start before launching the local API
     time.sleep(5)
@@ -132,5 +135,6 @@ if __name__ == "__main__":
     neighborhood.join()
     portscanner.join()
     datatransfer.join()
+    webscanner.join() #webscanner added
 
 sys.exit(0)
