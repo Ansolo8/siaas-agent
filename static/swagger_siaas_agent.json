@@ -43,6 +43,9 @@
                   "platform",
                   "neighborhood",
                   "portscanner",
+                  "webscanner",
+                  "metasploit",
+                  "remediation",
                   "config",
                   "*"
                 ]
