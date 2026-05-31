@@ -4,6 +4,7 @@
 
 import concurrent.futures
 import hashlib
+import json
 import logging
 import os
 import re
@@ -25,12 +26,33 @@ WEBSCANNER_DB = os.path.join(VAR_DIR, "webscanner.db")
 CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 MSF_MODULE_RE = re.compile(r"(?P<rank>\b(?:excellent|great|good|normal|average|low|manual)\b).*?(?P<module>exploit/[\w/\-]+)", re.IGNORECASE)
 
+# Metasploit ranks the local metadata cache stores as integers; map them to the
+# canonical names so the output is consistent regardless of correlation source.
+RANK_SCORE_TO_NAME = {600: "excellent", 500: "great", 400: "good", 300: "normal", 200: "average", 100: "low", 0: "manual"}
+RANK_NAME_TO_SCORE = {name: score for score, name in RANK_SCORE_TO_NAME.items()}
+
+# Candidate locations for Metasploit's pre-built module metadata cache. Reading
+# this JSON lets us correlate CVEs to modules in-process, without spawning a
+# msfconsole per search term (which is slow and produces noisy keyword matches).
+DEFAULT_METADATA_PATHS = [
+    os.path.expanduser("~/.msf4/store/modules_metadata_base.json"),
+    "/root/.msf4/store/modules_metadata_base.json",
+    "/opt/metasploit-framework/embedded/framework/db/modules_metadata_base.json",
+    "/usr/share/metasploit-framework/db/modules_metadata_base.json",
+]
+
+# Module-level cache so the (large) metadata file is parsed once and only
+# re-read when the file changes on disk.
+_METADATA_INDEX = None
+_METADATA_MTIME = None
+_METADATA_SOURCE = None
+
 
 def _config_bool(name, default=False):
     value = siaas_aux.get_config_from_configs_db(config_name=name, convert_to_string=True)
     if value is None:
         return default
-    return siaas_aux.validate_bool_string(value)
+    return siaas_aux.validate_bool_string(value, default_output=default)
 
 
 def _config_int(name, default):
@@ -38,6 +60,13 @@ def _config_int(name, default):
         return int(siaas_aux.get_config_from_configs_db(config_name=name, convert_to_string=True))
     except Exception:
         return default
+
+
+def _config_string(name, default=""):
+    value = siaas_aux.get_config_from_configs_db(config_name=name, convert_to_string=True)
+    if value is None or value == "":
+        return default
+    return value
 
 
 def _walk_values(value):
@@ -66,20 +95,161 @@ def stable_id(*parts):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def build_search_terms(service_name="", product="", cves=None):
+def normalize_platform(value):
+    """
+    Maps OS/platform free text (from scanner system_info or module metadata) to a
+    small set of canonical platform tokens used for relevance filtering.
+    """
+    text = str(value or "").lower()
+    tokens = set()
+    if any(k in text for k in ["windows", "win32", "win64", "microsoft"]):
+        tokens.add("windows")
+    if any(k in text for k in ["linux", "ubuntu", "debian", "centos", "red hat", "redhat", "fedora"]):
+        tokens.add("linux")
+    if any(k in text for k in ["unix", "bsd", "solaris", "aix", "macos", "mac os", "osx", "darwin", "android"]):
+        tokens.add("unix")
+    return tokens
+
+
+def target_platform_tokens(system_info):
+    """
+    Builds the set of platform tokens for a target from its scanner system_info.
+    """
+    if not isinstance(system_info, dict):
+        return set()
+    tokens = set()
+    for key in ("os_family", "os_name", "os_vendor", "os_type"):
+        tokens |= normalize_platform(system_info.get(key, ""))
+    return tokens
+
+
+def _rank_name(raw_rank):
+    if isinstance(raw_rank, (int, float)):
+        return RANK_SCORE_TO_NAME.get(int(raw_rank), "unknown")
+    name = str(raw_rank or "").strip().lower()
+    return name if name in RANK_NAME_TO_SCORE else "unknown"
+
+
+def _rank_score(rank_name):
+    return RANK_NAME_TO_SCORE.get(rank_name, -1)
+
+
+def get_metadata_path():
+    configured = _config_string("metasploit_metadata_path")
+    candidates = [configured] if configured else []
+    candidates += DEFAULT_METADATA_PATHS
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def load_metadata_index():
+    """
+    Loads and indexes Metasploit's module metadata by CVE. The index maps each
+    CVE -> list of exploit module descriptors. Cached in-process and refreshed
+    only when the backing file's mtime changes. Returns (index, source_path) or
+    (None, error_string).
+    """
+    global _METADATA_INDEX, _METADATA_MTIME, _METADATA_SOURCE
+
+    path = get_metadata_path()
+    if not path:
+        return None, "metadata cache not found (run msfconsole once to generate ~/.msf4/store/modules_metadata_base.json, or set metasploit_metadata_path)"
+
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError as exc:
+        return None, f"could not stat metadata file: {exc}"
+
+    if _METADATA_INDEX is not None and _METADATA_SOURCE == path and _METADATA_MTIME == mtime:
+        return _METADATA_INDEX, path
+
+    try:
+        with open(path, "r") as handle:
+            raw = json.load(handle)
+    except Exception as exc:
+        return None, f"could not parse metadata file {path}: {exc}"
+
+    index = {}
+    for fullname, meta in raw.items():
+        if not isinstance(meta, dict):
+            continue
+        if str(meta.get("type", "")).lower() != "exploit":
+            continue
+        references = meta.get("references", []) or []
+        cves = {str(ref).upper() for ref in references if str(ref).upper().startswith("CVE-")}
+        if not cves:
+            continue
+        descriptor = {
+            "module": meta.get("fullname", fullname),
+            "rank": _rank_name(meta.get("rank")),
+            "platform": meta.get("platform", ""),
+            "name": meta.get("name", ""),
+            "disclosure_date": meta.get("disclosure_date", ""),
+            "source": "metadata_cache",
+        }
+        for cve in cves:
+            index.setdefault(cve, []).append(descriptor)
+
+    _METADATA_INDEX = index
+    _METADATA_MTIME = mtime
+    _METADATA_SOURCE = path
+    logger.info("Loaded Metasploit metadata index from %s (%s CVEs mapped to exploit modules)", path, len(index))
+    return index, path
+
+
+def correlate_via_metadata(cves, platform_tokens, filter_platform=True, limit=5):
+    """
+    Correlates a list of CVEs to Metasploit exploit modules using the local
+    metadata index. This is precise (CVE reference match), unlike a keyword
+    search. Optionally drops modules whose platform contradicts the target OS.
+    Returns (modules, matched_cves, error_string).
+    """
+    index, source = load_metadata_index()
+    if index is None:
+        return [], [], source  # source carries the error message here
+
+    modules = []
+    matched_cves = set()
+    seen = set()
+    for cve in cves:
+        for descriptor in index.get(cve.upper(), []):
+            if filter_platform and platform_tokens:
+                module_tokens = normalize_platform(descriptor.get("platform", ""))
+                # Keep platform-agnostic modules (no tokens) and matches only.
+                if module_tokens and not (module_tokens & platform_tokens):
+                    continue
+            matched_cves.add(cve.upper())
+            module_name = descriptor["module"]
+            if module_name in seen:
+                continue
+            seen.add(module_name)
+            enriched = dict(descriptor)
+            enriched["matched_cve"] = cve.upper()
+            modules.append(enriched)
+
+    # Highest rank first, then by module name for determinism.
+    modules.sort(key=lambda m: (-_rank_score(m.get("rank", "unknown")), m.get("module", "")))
+    return modules[:limit], sorted(matched_cves), ""
+
+
+def build_search_terms(service_name="", product="", cves=None, product_fallback=False):
+    """
+    Builds msfconsole search terms. CVE searches are precise and always preferred.
+    Product/service keyword searches are noisy (they match unrelated modules) and
+    are only emitted when explicitly enabled via product_fallback.
+    """
     terms = []
     for cve in cves or []:
         terms.append(f"cve:{cve}")
 
-    product_clean = re.sub(r"[^A-Za-z0-9_.+ -]", " ", product or "").strip()
-    if product_clean:
-        words = [word for word in product_clean.split() if len(word) > 2]
-        if words:
-            terms.append(" ".join(words[:3]))
-
-    service_clean = re.sub(r"[^A-Za-z0-9_.+-]", " ", service_name or "").strip()
-    if service_clean and service_clean.lower() not in ["unknown", "tcpwrapped"]:
-        terms.append(f"type:exploit {service_clean}")
+    if product_fallback:
+        product_clean = re.sub(r"[^A-Za-z0-9_.+ -]", " ", product or "").strip()
+        if product_clean:
+            words = [word for word in product_clean.split() if len(word) > 2]
+            if words:
+                terms.append("type:exploit " + " ".join(words[:3]))
 
     # Keep order but remove duplicates.
     deduped = []
@@ -116,13 +286,18 @@ def parse_msfconsole_search(output, limit=5):
         if module_name in seen:
             continue
         seen.add(module_name)
-        modules.append({"module": module_name, "rank": rank, "source": "msfconsole search"})
+        modules.append({"module": module_name, "rank": rank, "source": "msfconsole_search"})
         if len(modules) >= limit:
             break
     return modules
 
 
-def search_metasploit_modules(search_terms, timeout=90, limit=5):
+def search_metasploit_modules(search_terms, platform_tokens=None, filter_platform=True, timeout=90, limit=5):
+    """
+    Fallback correlation using msfconsole's search command. Only used when the
+    metadata cache is unavailable. Platform filtering is best-effort here because
+    the search table does not always carry platform data.
+    """
     msfconsole = get_msfconsole_path()
     if not msfconsole:
         return [], "msfconsole not found in PATH; install Metasploit or configure metasploit_msfconsole_path"
@@ -160,9 +335,8 @@ def search_metasploit_modules(search_terms, timeout=90, limit=5):
             continue
         seen.add(module["module"])
         deduped.append(module)
-        if len(deduped) >= limit:
-            break
-    return deduped, "; ".join(errors)
+    deduped.sort(key=lambda m: (-_rank_score(m.get("rank", "unknown")), m.get("module", "")))
+    return deduped[:limit], "; ".join(errors)
 
 
 def collect_target_services():
@@ -208,21 +382,45 @@ def collect_target_services():
     return targets
 
 
-def assess_service(target, port_proto, service_record, enable_msf_search=False, timeout=90, limit=5):
+def assess_service(target, port_proto, service_record, system_info=None, enable_msf_search=False,
+                   use_metadata=True, filter_platform=True, product_fallback=False, timeout=90, limit=5):
     evidence = service_record.get("evidence", {})
     cves = extract_cves(evidence)
-    search_terms = build_search_terms(service_record.get("service", ""), service_record.get("product", ""), cves)
+    platform_tokens = target_platform_tokens(system_info)
+
     modules = []
+    matched_cves = []
+    search_terms = []
+    correlation_method = "none"
     search_error = ""
-    if enable_msf_search and search_terms:
-        modules, search_error = search_metasploit_modules(search_terms, timeout=timeout, limit=limit)
+
+    # Preferred path: precise CVE->module correlation from the local metadata cache.
+    if use_metadata and cves:
+        modules, matched_cves, search_error = correlate_via_metadata(
+            cves, platform_tokens, filter_platform=filter_platform, limit=limit)
+        if modules:
+            correlation_method = "metadata_cache"
+
+    # Fallback path: live msfconsole search (CVE-first; product keyword optional).
+    if not modules and enable_msf_search:
+        search_terms = build_search_terms(
+            service_record.get("service", ""), service_record.get("product", ""), cves,
+            product_fallback=product_fallback)
+        if search_terms:
+            modules, fallback_error = search_metasploit_modules(
+                search_terms, platform_tokens=platform_tokens, filter_platform=filter_platform,
+                timeout=timeout, limit=limit)
+            if modules:
+                correlation_method = "msfconsole_search"
+            search_error = "; ".join(filter(None, [search_error, fallback_error]))
 
     confidence = "high" if cves and modules else "medium" if cves or modules else "low"
-    action = "review"
     if modules:
         action = "manual_validation_required"
     elif cves:
         action = "metasploit_module_not_found"
+    else:
+        action = "review"
 
     return {
         "id": stable_id(target, port_proto, service_record.get("service", ""), service_record.get("product", ""), ",".join(cves)),
@@ -232,8 +430,11 @@ def assess_service(target, port_proto, service_record, enable_msf_search=False, 
         "product": service_record.get("product", ""),
         "state": service_record.get("state", "unknown"),
         "source_modules": service_record.get("source_modules", []),
+        "target_platform": sorted(platform_tokens),
         "cves": cves,
+        "matched_cves": matched_cves,
         "search_terms": search_terms,
+        "correlation_method": correlation_method,
         "metasploit_modules": modules,
         "confidence": confidence,
         "recommended_action": action,
@@ -265,17 +466,27 @@ def _source_stats():
 def main():
     start_time = time.time()
     enable_msf_search = _config_bool("metasploit_enable_msfconsole_search", default=False)
+    use_metadata = _config_bool("metasploit_use_metadata_cache", default=True)
+    filter_platform = _config_bool("metasploit_filter_by_platform", default=True)
+    product_fallback = _config_bool("metasploit_product_fallback_search", default=False)
     timeout = _config_int("metasploit_msfconsole_timeout_sec", 90)
     limit = _config_int("metasploit_search_result_limit", 5)
     max_workers = _config_int("metasploit_max_parallel_workers", 2)
     if max_workers < 1:
         max_workers = 1
 
+    metadata_status = ""
+    if use_metadata:
+        _, metadata_status = load_metadata_index()
+
     targets = collect_target_services()
     output = {
         "@generated": siaas_aux.get_now_utc_str(),
         "module_mode": "defensive_correlation",
         "msfconsole_search_enabled": enable_msf_search,
+        "metadata_cache_enabled": use_metadata,
+        "metadata_cache_source": _METADATA_SOURCE if use_metadata else None,
+        "platform_filtering_enabled": filter_platform,
         "targets": {},
         "stats": {
             "num_targets": len(targets),
@@ -289,13 +500,15 @@ def main():
     futures = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         for target, target_record in targets.items():
+            system_info = target_record.get("system_info", {})
             output["targets"][target] = {
-                "system_info": target_record.get("system_info", {}),
+                "system_info": system_info,
                 "services": {},
             }
             for port_proto, service_record in target_record.get("services", {}).items():
                 futures.append((target, port_proto, executor.submit(
-                    assess_service, target, port_proto, service_record, enable_msf_search, timeout, limit
+                    assess_service, target, port_proto, service_record, system_info,
+                    enable_msf_search, use_metadata, filter_platform, product_fallback, timeout, limit
                 )))
 
         for target, port_proto, future in futures:
@@ -309,11 +522,17 @@ def main():
             output["stats"]["num_candidate_modules"] += len(assessed.get("metasploit_modules", []))
 
     output["stats"]["time_taken_sec"] = int(time.time() - start_time)
-    if not enable_msf_search:
+    if use_metadata and (_METADATA_INDEX is None):
         output["operator_note"] = (
-            "Metasploit msfconsole search is disabled. The assistant will still record targets, CVEs, "
-            "and search terms, but metasploit_modules will remain empty until "
-            "metasploit_enable_msfconsole_search=true and msfconsole is installed/configured."
+            "Metasploit metadata cache could not be loaded (" + str(metadata_status) + "). "
+            "Run msfconsole once to generate it, set metasploit_metadata_path, or enable "
+            "metasploit_enable_msfconsole_search=true as a fallback."
+        )
+    elif not enable_msf_search and not use_metadata:
+        output["operator_note"] = (
+            "Both correlation methods are disabled. Enable metasploit_use_metadata_cache=true "
+            "(recommended) and/or metasploit_enable_msfconsole_search=true to populate "
+            "metasploit_modules."
         )
     if not targets:
         output["operator_note"] = (
