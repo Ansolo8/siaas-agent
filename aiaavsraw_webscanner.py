@@ -141,6 +141,35 @@ def get_web_app_info(url):
 # OWASP ZAP API HELPERS
 # --------------------------------------------------
 
+# Severity ranking used to keep the highest severity seen across the many
+# instances ZAP reports for the same alert type.
+SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3}
+
+
+def _cfg_str(name, default=""):
+    value = siaas_aux.get_config_from_configs_db(config_name=name, convert_to_string=True)
+    return value if value not in (None, "") else default
+
+
+def _cfg_int(name, default):
+    try:
+        return int(siaas_aux.get_config_from_configs_db(config_name=name, convert_to_string=True))
+    except Exception:
+        return default
+
+
+def _risk_to_severity(riskdesc):
+    risk = (riskdesc or "").lower()
+    if "high" in risk:
+        return "high"
+    if "medium" in risk:
+        return "medium"
+    if "low" in risk:
+        return "low"
+    if "informational" in risk or "info" in risk:
+        return "info"
+    return "medium"
+
 
 def get_zap_api_settings():
     """
@@ -282,13 +311,31 @@ def ensure_zap_daemon(settings):
 
 def run_zap_scan(url, timeout=1800):
     """
-    Runs OWASP ZAP scan via API (spider + active scan) and returns report-like JSON.
+    Runs an OWASP ZAP scan via the API and returns report-like JSON.
+
+    The scan weight is controlled by zap_scan_mode:
+      - "passive" (default): spider (bounded) + passive analysis only. Much lighter,
+        suitable for low-resource hosts like a Raspberry Pi. Finds misconfigurations,
+        missing headers, information leaks, etc., but does not attack the target.
+      - "spider": spider only (whatever passive alerts are produced during crawl).
+      - "active": spider + full active scan (the heavy mode; attacks every endpoint).
+    The spider is bounded by zap_spider_max_children, and each phase has its own
+    time budget so a single target cannot run away with the host's resources.
     """
-    logger.info(f"Running OWASP ZAP scan against {url}")
     settings = get_zap_api_settings()
     zap_base = settings["base"]
     zap_key = settings["key"]
     api_timeout = min(timeout, settings["timeout"])
+
+    mode = _cfg_str("zap_scan_mode", "passive").lower().strip()
+    if mode not in ("passive", "spider", "active"):
+        mode = "passive"
+    spider_max_children = _cfg_int("zap_spider_max_children", 10)
+    spider_deadline_sec = _cfg_int("zap_spider_timeout_sec", min(api_timeout, 300))
+    passive_deadline_sec = _cfg_int("zap_passive_timeout_sec", 120)
+    ascan_deadline_sec = _cfg_int("zap_ascan_timeout_sec", api_timeout)
+
+    logger.info(f"Running OWASP ZAP scan against {url} (mode={mode}, spider_max_children={spider_max_children})")
 
     if not ensure_zap_daemon(settings):
         reason = ZAP_DAEMON_LAST_ERROR or f"ZAP API unavailable at {zap_base}"
@@ -308,15 +355,15 @@ def run_zap_scan(url, timeout=1800):
                 timeout=30
             )
 
-            # Spider
+            # Spider (bounded by maxChildren and a time budget)
             spider_resp = zap_api_get(
                 zap_base, "spider", "action/scan",
-                dict(params, **{"url": url, "maxChildren": "0", "recurse": "true"}),
+                dict(params, **{"url": url, "maxChildren": str(spider_max_children), "recurse": "true"}),
                 timeout=30
             )
             spider_id = spider_resp.get("scan")
             if spider_id is not None:
-                spider_deadline = time.time() + api_timeout
+                spider_deadline = time.time() + spider_deadline_sec
                 while time.time() < spider_deadline:
                     status = zap_api_get(
                         zap_base, "spider", "view/status",
@@ -326,25 +373,51 @@ def run_zap_scan(url, timeout=1800):
                     if str(status) == "100":
                         break
                     time.sleep(2)
+                else:
+                    logger.warning(f"ZAP spider time budget reached for {url}; stopping spider.")
+                    try:
+                        zap_api_get(zap_base, "spider", "action/stop", dict(params, **{"scanId": spider_id}), timeout=30)
+                    except Exception:
+                        pass
 
-            # Active scan
-            ascan_resp = zap_api_get(
-                zap_base, "ascan", "action/scan",
-                dict(params, **{"url": url, "recurse": "true", "inScopeOnly": "false"}),
-                timeout=30
-            )
-            ascan_id = ascan_resp.get("scan")
-            if ascan_id is not None:
-                ascan_deadline = time.time() + api_timeout
-                while time.time() < ascan_deadline:
-                    status = zap_api_get(
-                        zap_base, "ascan", "view/status",
-                        dict(params, **{"scanId": ascan_id}),
-                        timeout=30
-                    ).get("status", "0")
-                    if str(status) == "100":
+            if mode in ("passive", "spider"):
+                # Let the passive scanner drain its queue, then collect alerts. No attacks.
+                passive_deadline = time.time() + passive_deadline_sec
+                while time.time() < passive_deadline:
+                    try:
+                        records = zap_api_get(
+                            zap_base, "pscan", "view/recordsToScan", params, timeout=30
+                        ).get("recordsToScan", "0")
+                    except Exception:
                         break
-                    time.sleep(3)
+                    if str(records) == "0":
+                        break
+                    time.sleep(2)
+            else:
+                # Active scan: spider + attack each endpoint, bounded by a time budget.
+                ascan_resp = zap_api_get(
+                    zap_base, "ascan", "action/scan",
+                    dict(params, **{"url": url, "recurse": "true", "inScopeOnly": "false"}),
+                    timeout=30
+                )
+                ascan_id = ascan_resp.get("scan")
+                if ascan_id is not None:
+                    ascan_deadline = time.time() + ascan_deadline_sec
+                    while time.time() < ascan_deadline:
+                        status = zap_api_get(
+                            zap_base, "ascan", "view/status",
+                            dict(params, **{"scanId": ascan_id}),
+                            timeout=30
+                        ).get("status", "0")
+                        if str(status) == "100":
+                            break
+                        time.sleep(3)
+                    else:
+                        logger.warning(f"ZAP active scan time budget reached for {url}; stopping scan.")
+                        try:
+                            zap_api_get(zap_base, "ascan", "action/stop", dict(params, **{"scanId": ascan_id}), timeout=30)
+                        except Exception:
+                            pass
 
             # Collect alerts for the target base URL
             alerts = zap_api_get(
@@ -420,62 +493,73 @@ def create_minimal_report(url, reason=""):
 
 def parse_zap_report(report, url):
     """
-    Parses ZAP JSON report into SIAAS-compatible format
-    Returns organized scan_results dict
+    Parses a ZAP JSON report into SIAAS-compatible format.
+
+    ZAP emits one alert *instance* per URL/parameter where a weakness triggers, so
+    the same weakness type (plugin) can appear hundreds of times. We deduplicate by
+    plugin ID into unique findings, but record how many instances each had and a few
+    example URLs, so the summary count matches the detail table instead of reporting
+    raw instance counts. Returns (scan_results, num_unique_findings, num_unique_high).
     """
     scan_results = {}
-    
+
     if not report or "site" not in report:
         # Create empty result structure
         scan_results["zap_scan"] = {
             "response_code": 0,
             "content_length": 0,
+            "num_unique": 0,
+            "num_instances": 0,
             "vuln": {}
         }
         return scan_results, 0, 0
-    
-    total_vulns = 0
-    total_exploits = 0
+
+    total_instances = 0
     vuln_dict = {}
-    
+
     for site in report["site"]:
         for alert in site.get("alerts", []):
             vuln_id = f"zap_{alert.get('pluginid', 'unknown')}"
-            
-            # Determine severity
-            risk = alert.get("riskdesc", "").lower()
-            severity = "medium"
-            if "high" in risk:
-                severity = "high"
-                total_exploits += 1
-            elif "medium" in risk:
-                severity = "medium"
-            elif "low" in risk:
-                severity = "low"
-            elif "informational" in risk:
-                severity = "info"
-            
-            # Create vulnerability entry
-            vuln_dict[vuln_id] = {
-                "type": "vulnerability",
-                "severity": severity,
-                "description": alert.get("desc", alert.get("alert", "Unknown")),
-                "source": "OWASP ZAP",
-                "confidence": alert.get("confidence", "Medium"),
-                "reference": alert.get("reference", ""),
-                "cwe": alert.get("cweid", ""),
-                "solution": alert.get("solution", "")
-            }
-            
-            total_vulns += 1
-    
-    # Organize like portscanner
+            severity = _risk_to_severity(alert.get("riskdesc", ""))
+            alert_url = alert.get("url", "")
+
+            entry = vuln_dict.get(vuln_id)
+            if entry is None:
+                entry = {
+                    "type": "vulnerability",
+                    "severity": severity,
+                    "description": alert.get("desc", alert.get("alert", "Unknown")),
+                    "source": "OWASP ZAP",
+                    "confidence": alert.get("confidence", "Medium"),
+                    "reference": alert.get("reference", ""),
+                    "cwe": alert.get("cweid", ""),
+                    "solution": alert.get("solution", ""),
+                    "instances": 0,
+                    "example_urls": [],
+                }
+                vuln_dict[vuln_id] = entry
+
+            entry["instances"] += 1
+            # Keep the highest severity observed across this plugin's instances.
+            if SEVERITY_ORDER.get(severity, 1) > SEVERITY_ORDER.get(entry["severity"], 1):
+                entry["severity"] = severity
+            if alert_url and alert_url not in entry["example_urls"] and len(entry["example_urls"]) < 5:
+                entry["example_urls"].append(alert_url)
+
+            total_instances += 1
+
+    # Unique-type counts so the summary matches what the detail table shows.
+    total_vulns = len(vuln_dict)
+    total_exploits = sum(1 for v in vuln_dict.values() if v["severity"] == "high")
+
     scan_results["zap_scan"] = {
         "response_code": 200,  # Placeholder
         "content_length": 0,   # Placeholder
+        "num_unique": total_vulns,
+        "num_instances": total_instances,
         "vuln": vuln_dict
     }
-    
+
     return scan_results, total_vulns, total_exploits
 
 
@@ -708,11 +792,18 @@ def main_web_target(target="localhost"):
     
     logger.info(f"Web scanning ended for {target}: {total_vulns} vulnerabilities were detected ({total_exploits} confirmed exploits), across {total_ports} ports and using {len(total_valid_scripts)} valid scripts. Elapsed time: {elapsed_time_sec} seconds")
     
+    # Count raw alert instances (across all URLs) separately from unique findings.
+    total_instances = 0
+    for scan_result in target_info["scanned_ports"][port_str]["scan_results"].values():
+        if isinstance(scan_result, dict):
+            total_instances += scan_result.get("zap_scan", {}).get("num_instances", 0)
+
     # Stats similar to portscanner
     target_info["stats"] = {}
     target_info["stats"]["num_scanned_ports"] = total_ports
     target_info["stats"]["num_valid_scripts"] = len(total_valid_scripts)
     target_info["stats"]["total_num_vulnerabilities"] = total_vulns
+    target_info["stats"]["total_num_instances"] = total_instances
     target_info["stats"]["total_num_exploits"] = total_exploits
     target_info["stats"]["time_taken_sec"] = elapsed_time_sec
     target_info["last_check"] = siaas_aux.get_now_utc_str()
