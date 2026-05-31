@@ -1,6 +1,6 @@
 # Intelligent System for Automation of Security Audits (SIAAS)
 # Agent - AI-style remediation advisor module
-# Local-rules and optional Ollama remediation report generator, 2026
+# Local-rules and optional free AI (Ollama/Groq/OpenAI-compatible/Gemini) remediation report generator, 2026
 
 import hashlib
 import json
@@ -26,6 +26,29 @@ METASPLOIT_DB = os.path.join(VAR_DIR, "metasploit.db")
 CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 SEVERITY_SCORE = {"critical": 100, "high": 80, "medium": 50, "low": 25, "info": 5, "unknown": 10}
 
+# System prompt shared by every provider: defensive scope, no exploit content,
+# and grounding rules to limit hallucination of fake fixes/versions.
+AI_SYSTEM_PROMPT = (
+    "You are a defensive cybersecurity remediation assistant for a vulnerability scanner. "
+    "Analyze the scanner evidence and produce remediation guidance specific to this finding. "
+    "Do not provide exploit steps, payloads, or instructions to compromise systems. "
+    "Base your guidance on the provided evidence and well-established vendor hardening practices. "
+    "Do NOT invent specific patch version numbers, CVE identifiers, or product names that are not "
+    "present in the evidence; when a precise fixed version is unknown, instruct the operator to "
+    "consult the official vendor advisory for the listed CVEs instead. "
+    "Return ONLY valid JSON with these keys: risk_summary, likely_impact, remediation_steps, "
+    "validation_steps, priority_reasoning. remediation_steps and validation_steps must be arrays "
+    "of concise actionable strings."
+)
+
+# Sensible defaults so users only need to set provider + API key for hosted options.
+PROVIDER_DEFAULTS = {
+    "ollama": {"model": "llama3.1:8b"},
+    "groq": {"api_base": "https://api.groq.com/openai/v1", "model": "llama-3.1-8b-instant", "key_env": "SIAAS_AI_API_KEY"},
+    "openai": {"api_base": "https://api.openai.com/v1", "model": "gpt-4o-mini", "key_env": "SIAAS_AI_API_KEY"},
+    "gemini": {"api_base": "https://generativelanguage.googleapis.com/v1beta", "model": "gemini-1.5-flash", "key_env": "SIAAS_AI_API_KEY"},
+}
+
 SERVICE_RECOMMENDATIONS = {
     "ssh": "Restrict SSH exposure to trusted networks, disable password login where possible, use key-based authentication, and keep the SSH daemon updated.",
     "http": "Patch the web server/application stack, enforce TLS, review security headers, validate inputs server-side, and retest with OWASP ZAP after changes.",
@@ -42,7 +65,7 @@ def _config_bool(name, default=False):
     value = siaas_aux.get_config_from_configs_db(config_name=name, convert_to_string=True)
     if value is None:
         return default
-    return siaas_aux.validate_bool_string(value)
+    return siaas_aux.validate_bool_string(value, default_output=default)
 
 
 def _config_int(name, default):
@@ -113,7 +136,6 @@ def recommendation_for(service, source, description="", cves=None, metasploit_mo
     return " ".join([base] + additions)
 
 
-
 def _trim_text(value, limit=1200):
     text = str(value or "")
     if len(text) <= limit:
@@ -134,21 +156,22 @@ def finding_ai_context(finding):
         "cves": finding.get("cves", []),
         "cwe": finding.get("cwe", ""),
         "reference": _trim_text(finding.get("reference", "")),
-        "metasploit_modules": finding.get("metasploit_modules", []),
+        "metasploit_modules": [m.get("module", m) if isinstance(m, dict) else m for m in finding.get("metasploit_modules", [])],
         "scanner_recommendation": _trim_text(finding.get("recommendation", "")),
     }
 
 
-def build_ollama_prompt(finding):
+def build_user_content(finding):
     context = json.dumps(finding_ai_context(finding), sort_keys=False)
     return (
-        "You are a defensive cybersecurity remediation assistant. Analyze the scanner evidence "
-        "and produce remediation guidance specific to this finding. Do not provide exploit steps, "
-        "payloads, or instructions to compromise systems. Return ONLY valid JSON with these keys: "
-        "risk_summary, likely_impact, remediation_steps, validation_steps, priority_reasoning. "
-        "remediation_steps and validation_steps must be arrays of concise actionable strings. "
-        "Scanner evidence: " + context
+        "Use the scanner_recommendation field as a trusted baseline and refine it for this specific "
+        "finding. Scanner evidence (JSON): " + context
     )
+
+
+def build_ollama_prompt(finding):
+    # Ollama's /api/generate takes a single prompt, so the system prompt is prepended.
+    return AI_SYSTEM_PROMPT + "\n\n" + build_user_content(finding)
 
 
 def _extract_json_object(text):
@@ -161,21 +184,7 @@ def _extract_json_object(text):
     return json.loads(text[start:end + 1])
 
 
-def ollama_remediation(finding, api_url, model, timeout):
-    payload = {
-        "model": model,
-        "prompt": build_ollama_prompt(finding),
-        "stream": False,
-        "format": "json",
-        "options": {
-            "temperature": 0.2,
-            "num_predict": 700,
-        },
-    }
-    response = requests.post(api_url.rstrip("/") + "/api/generate", json=payload, timeout=timeout)
-    response.raise_for_status()
-    model_text = response.json().get("response", "")
-    ai_result = _extract_json_object(model_text)
+def _validate_ai_result(ai_result):
     if not isinstance(ai_result.get("remediation_steps", []), list):
         raise ValueError("model remediation_steps was not a list")
     if not isinstance(ai_result.get("validation_steps", []), list):
@@ -183,33 +192,132 @@ def ollama_remediation(finding, api_url, model, timeout):
     return ai_result
 
 
+def ollama_remediation(finding, api_url, model, timeout):
+    payload = {
+        "model": model,
+        "prompt": build_ollama_prompt(finding),
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.2, "num_predict": 700},
+    }
+    response = requests.post(api_url.rstrip("/") + "/api/generate", json=payload, timeout=timeout)
+    response.raise_for_status()
+    model_text = response.json().get("response", "")
+    return _validate_ai_result(_extract_json_object(model_text))
+
+
+def openai_compatible_remediation(finding, api_base, model, api_key, timeout):
+    """
+    Works with any OpenAI-compatible chat completions endpoint: Groq, OpenAI,
+    OpenRouter, Mistral, Together, etc. Most offer a free tier.
+    """
+    if not api_key:
+        raise ValueError("missing API key (set the env var named by remediation_ai_api_key_env)")
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": AI_SYSTEM_PROMPT},
+            {"role": "user", "content": build_user_content(finding)},
+        ],
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"}
+    response = requests.post(api_base.rstrip("/") + "/chat/completions", json=payload, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    model_text = response.json()["choices"][0]["message"]["content"]
+    return _validate_ai_result(_extract_json_object(model_text))
+
+
+def gemini_remediation(finding, api_base, model, api_key, timeout):
+    if not api_key:
+        raise ValueError("missing API key (set the env var named by remediation_ai_api_key_env)")
+    url = api_base.rstrip("/") + "/models/" + model + ":generateContent?key=" + api_key
+    payload = {
+        "system_instruction": {"parts": [{"text": AI_SYSTEM_PROMPT}]},
+        "contents": [{"parts": [{"text": build_user_content(finding)}]}],
+        "generationConfig": {"temperature": 0.2, "response_mime_type": "application/json"},
+    }
+    response = requests.post(url, json=payload, timeout=timeout)
+    response.raise_for_status()
+    model_text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    return _validate_ai_result(_extract_json_object(model_text))
+
+
+def _resolve_api_key():
+    key_env = _config_string("remediation_ai_api_key_env", "SIAAS_AI_API_KEY")
+    key = os.environ.get(key_env, "")
+    if not key:
+        # Convenience fallback; the env var is preferred so keys are not synced in configs.
+        key = _config_string("remediation_ai_api_key", "")
+    return key
+
+
+def _call_provider(provider, finding, model, timeout):
+    if provider == "ollama":
+        api_url = _config_string("remediation_ollama_api_url", "http://127.0.0.1:11434")
+        return ollama_remediation(finding, api_url, model, timeout)
+    if provider in ("groq", "openai"):
+        api_base = _config_string("remediation_ai_api_base", PROVIDER_DEFAULTS[provider]["api_base"])
+        return openai_compatible_remediation(finding, api_base, model, _resolve_api_key(), timeout)
+    if provider == "gemini":
+        api_base = _config_string("remediation_ai_api_base", PROVIDER_DEFAULTS["gemini"]["api_base"])
+        return gemini_remediation(finding, api_base, model, _resolve_api_key(), timeout)
+    raise ValueError("unsupported remediation_ai_provider: " + provider)
+
+
+def _ai_signature(provider, model, finding):
+    """Signature over provider/model and the AI-relevant evidence, used for caching."""
+    return stable_id(provider, model, json.dumps(finding_ai_context(finding), sort_keys=True))
+
+
 def enrich_with_ai(remediation_plan):
     provider = _config_string("remediation_ai_provider", "local_rules").lower().strip()
     if provider in ["", "none", "local_rules", "rules"]:
         return remediation_plan, {"enabled": False, "provider": "local_rules"}
-    if provider != "ollama":
+    if provider not in PROVIDER_DEFAULTS:
         return remediation_plan, {"enabled": False, "provider": provider, "error": "unsupported remediation_ai_provider"}
 
-    model = _config_string("remediation_ai_model", "llama3.1:8b")
-    api_url = _config_string("remediation_ollama_api_url", "http://127.0.0.1:11434")
+    model = _config_string("remediation_ai_model", PROVIDER_DEFAULTS[provider]["model"])
     timeout = _config_int("remediation_ai_timeout_sec", 60)
     max_findings = _config_int("remediation_ai_max_findings", 20)
-    stats = {"enabled": True, "provider": "ollama", "model": model, "attempted": 0, "succeeded": 0, "failed": 0}
+    cache_enabled = _config_bool("remediation_ai_cache", default=True)
+    stats = {"enabled": True, "provider": provider, "model": model,
+             "attempted": 0, "succeeded": 0, "failed": 0, "cached": 0}
 
-    for finding in remediation_plan[:max_findings]:
+    calls_made = 0
+    for finding in remediation_plan:
+        signature = _ai_signature(provider, model, finding)
+
+        # Reuse a previous AI answer when nothing relevant changed (carried over by merge_state).
+        if cache_enabled and finding.get("ai_remediation") and finding.get("ai_signature") == signature:
+            stats["cached"] += 1
+            if finding["ai_remediation"].get("remediation_steps"):
+                finding["recommendation"] = " ".join(str(step) for step in finding["ai_remediation"]["remediation_steps"][:5])
+            finding.pop("ai_error", None)
+            continue
+
+        if calls_made >= max_findings:
+            continue  # leave the rule-based recommendation in place for the overflow
+
+        calls_made += 1
         stats["attempted"] += 1
         try:
-            ai_result = ollama_remediation(finding, api_url, model, timeout)
+            ai_result = _call_provider(provider, finding, model, timeout)
             finding["ai_remediation"] = ai_result
             finding["ai_model"] = model
+            finding["ai_signature"] = signature
+            finding.pop("ai_error", None)
             if ai_result.get("remediation_steps"):
                 finding["recommendation"] = " ".join(str(step) for step in ai_result["remediation_steps"][:5])
             stats["succeeded"] += 1
         except Exception as exc:
             finding["ai_error"] = str(exc)
+            finding.pop("ai_signature", None)
             stats["failed"] += 1
             logger.warning("AI remediation failed for finding %s: %s", finding.get("id"), exc)
     return remediation_plan, stats
+
 
 def merge_state(existing_report, finding):
     existing_findings = {}
@@ -221,6 +329,10 @@ def merge_state(existing_report, finding):
     finding["first_seen"] = old.get("first_seen", finding["last_seen"])
     finding["status"] = old.get("status", "open")
     finding["notes"] = old.get("notes", "")
+    # Carry over a previously generated AI answer so enrich_with_ai can reuse it (caching).
+    for key in ("ai_remediation", "ai_model", "ai_signature"):
+        if old.get(key) is not None:
+            finding[key] = old[key]
     return finding
 
 

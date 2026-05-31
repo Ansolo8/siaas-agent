@@ -27,21 +27,36 @@ __
 This agent can now run three optional extension modules that keep the same local JSON database and data-transfer architecture as the original SIAAS modules:
 
 - `aiaavsraw_webscanner.py` writes OWASP ZAP web scan output to `var/webscanner.db`.
-- `siaas_metasploit.py` writes defensive Metasploit correlation output to `var/metasploit.db`. It correlates CVEs, services, and products from scanner evidence with local Metasploit module candidates when `metasploit_enable_msfconsole_search=true`; it does **not** execute exploits or payloads. If it runs before scanner DBs exist, it retries with `metasploit_no_data_retry_interval_sec` instead of waiting a full long scan interval.
-- `siaas_remediation.py` writes a remediation report to `var/remediation.db` by consuming the port scanner, web scanner, and Metasploit assistant outputs. By default it uses deterministic local rules; set `remediation_ai_provider=ollama` with a local free Ollama model (for example `llama3.1:8b`) to generate vulnerability-specific AI remediation text from the scanner evidence.
+- `siaas_metasploit.py` writes defensive Metasploit correlation output to `var/metasploit.db`. It correlates the CVEs found in scanner evidence with Metasploit exploit modules; it does **not** execute exploits or payloads. By default it uses precise CVE→module correlation read directly from Metasploit's local module metadata cache (`metasploit_use_metadata_cache=true`), filtered by the target's detected OS/platform (`metasploit_filter_by_platform=true`), and ranks candidates by module rank. A live `msfconsole search` fallback is available via `metasploit_enable_msfconsole_search=true`. If it runs before scanner DBs exist, it retries with `metasploit_no_data_retry_interval_sec` instead of waiting a full long scan interval.
+- `siaas_remediation.py` writes a remediation report to `var/remediation.db` by consuming the port scanner, web scanner, and Metasploit assistant outputs. By default it uses deterministic local rules; set `remediation_ai_provider` to a free AI backend to generate vulnerability-specific remediation text grounded in the scanner evidence. Supported providers: `ollama` (local/offline), `groq` (free hosted), `openai`/any OpenAI-compatible endpoint, and `gemini`. AI answers are cached per finding (`remediation_ai_cache=true`) so unchanged findings are not re-queried every loop.
 
 The data-transfer and internal API module list includes `platform`, `neighborhood`, `portscanner`, `webscanner`, `metasploit`, `remediation`, and `config`, so server-side consumers can ingest the new module outputs without changing the agent upload endpoint.
 
 ### Metasploit and AI remediation notes
 
-`metasploit_enable_msfconsole_search` is disabled by default for safety and performance. With the default setting, `var/metasploit.db` can show scanner targets, CVEs, and generated search terms, but `metasploit_modules` will stay empty. To search local Metasploit modules, install Metasploit, ensure `msfconsole` is in `PATH` or set `metasploit_msfconsole_path`, then set `metasploit_enable_msfconsole_search=true`.
+**Metasploit correlation.** The preferred correlation method reads Metasploit's local module metadata cache (`~/.msf4/store/modules_metadata_base.json`) and matches the CVEs found by the scanners to exploit modules whose references include those CVEs. This is precise and fast (no `msfconsole` process is spawned). To enable it, install Metasploit and run `msfconsole` once so the cache is generated (or point `metasploit_metadata_path` at the file). Candidates are filtered by the target's detected OS so, for example, Windows exploits are not attached to a Linux host. If the metadata cache is unavailable, set `metasploit_enable_msfconsole_search=true` to fall back to a live `msfconsole search` (CVE-first; enable `metasploit_product_fallback_search=true` only if you accept noisier product/service keyword matches). Each candidate carries its `rank`, `platform`, the `matched_cve`, and the `correlation_method` used.
 
-For free/local AI remediation, install Ollama on the agent host, pull a model such as `ollama pull llama3.1:8b`, and configure:
+**AI remediation.** The remediation module always keeps the deterministic local-rule recommendation as a baseline and fallback. If an AI provider is unavailable or a response cannot be parsed, the finding is still saved with the rule-based recommendation and an `ai_error` field for troubleshooting.
 
-```ini
-remediation_ai_provider = ollama
-remediation_ai_model = llama3.1:8b
-remediation_ollama_api_url = http://127.0.0.1:11434
-```
+- Free/local (recommended for sensitive data, fully offline): install Ollama, `ollama pull llama3.1:8b`, then:
 
-The remediation module keeps a local-rule fallback. If Ollama is unavailable or a model response cannot be parsed, the finding is still saved with the rule-based recommendation and an `ai_error` field for troubleshooting.
+  ```ini
+  remediation_ai_provider = ollama
+  remediation_ai_model = llama3.1:8b
+  remediation_ollama_api_url = http://127.0.0.1:11434
+  ```
+
+- Free hosted (e.g. Groq). The API key is read from an environment variable (named by `remediation_ai_api_key_env`, default `SIAAS_AI_API_KEY`) so it is never written into synced configs:
+
+  ```ini
+  remediation_ai_provider = groq
+  remediation_ai_model = llama-3.1-8b-instant
+  # remediation_ai_api_base is auto-set per provider; override only if needed
+  ```
+
+  ```bash
+  # export the key in the agent's environment (e.g. the systemd unit or your shell)
+  export SIAAS_AI_API_KEY="your-key"
+  ```
+
+  `openai` (or any OpenAI-compatible endpoint via `remediation_ai_api_base`) and `gemini` are configured the same way, only changing `remediation_ai_provider` and `remediation_ai_model`.
