@@ -401,6 +401,8 @@ def collect_webscanner_findings():
                         "cves": cves,
                         "cwe": vuln.get("cwe", ""),
                         "reference": vuln.get("reference", ""),
+                        "instances": vuln.get("instances", 1),
+                        "example_urls": vuln.get("example_urls", []),
                         "recommendation": vuln.get("solution") or recommendation_for(service, "webscanner", cves=cves),
                         "last_seen": siaas_aux.get_now_utc_str(),
                     })
@@ -493,13 +495,21 @@ def loop():
             logger.warning("Remediation advisor is disabled as per configuration! Not running.")
             time.sleep(60)
             continue
+        report = None
         try:
             report = build_report()
             siaas_aux.write_to_local_file(REMEDIATION_DB, report)
             logger.info("Remediation advisor saved %s findings", len(report.get("remediation_plan", [])))
         except Exception as exc:
             logger.error(f"Remediation advisor cycle failed: {exc}")
-        sleep_time = _config_int("remediation_loop_interval_sec", 3600)
+
+        # While there are no findings yet (scanners still running on their own loops),
+        # retry quickly so results appear soon after a scan completes, instead of
+        # waiting a full long interval. Once findings exist, use the normal interval.
+        if report is not None and len(report.get("remediation_plan", [])) == 0:
+            sleep_time = _config_int("remediation_initial_retry_interval_sec", 300)
+        else:
+            sleep_time = _config_int("remediation_loop_interval_sec", 3600)
         logger.debug("Sleeping for %s seconds before next remediation advisor loop ...", sleep_time)
         time.sleep(sleep_time)
 

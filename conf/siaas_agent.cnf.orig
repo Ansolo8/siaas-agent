@@ -32,9 +32,14 @@ nmap_scripts = vuln # if commented no nmap scanning script is run. Options: auth
 #web_targets = https://example.org,http://192.0.2.10:8080 # comma-separated URLs/hosts for the web scanner (Default: None)
 #webscanner_loop_interval_sec = 21600 # (Default: 21600)
 #webscanner_max_parallel_workers = 1 # ZAP scans are serialized for a shared daemon (Default: 1)
+#zap_scan_mode = passive # scan weight: passive (light, spider + passive analysis, no attacks), spider (spider only), active (heavy, attacks every endpoint) (Default: passive)
+#zap_spider_max_children = 10 # max child nodes the spider follows per node; lower = lighter/faster (Default: 10; use 0 for unlimited)
+#zap_spider_timeout_sec = 300 # time budget for the spider phase, then it is stopped (Default: min(zap_scan_timeout_sec, 300))
+#zap_passive_timeout_sec = 120 # time budget for the passive scan queue to drain in passive/spider modes (Default: 120)
+#zap_ascan_timeout_sec = 900 # time budget for the active scan phase when zap_scan_mode=active (Default: zap_scan_timeout_sec)
 #zap_api_base = http://127.0.0.1:8090 # OWASP ZAP daemon API base URL (Default: http://127.0.0.1:8090)
 #zap_api_key = changeme # optional ZAP API key (Default: None)
-#zap_scan_timeout_sec = 900 # (Default: 900)
+#zap_scan_timeout_sec = 900 # overall ZAP scan timeout cap (Default: 900)
 #zap_use_docker_daemon = true # start a dockerized ZAP daemon if the API is unavailable (Default: true)
 
 # Metasploit assistant runtime configurations (defensive correlation only)
@@ -64,3 +69,23 @@ nmap_scripts = vuln # if commented no nmap scanning script is run. Options: auth
 #remediation_ai_cache = true # reuse a prior AI answer when the finding evidence is unchanged (Default: true)
 #remediation_ai_timeout_sec = 60 # max seconds per model response (Default: 60)
 #remediation_ai_max_findings = 20 # cap *new* AI calls per remediation cycle to avoid very long loops; cached findings don't count (Default: 20)
+#remediation_initial_retry_interval_sec = 300 # while there are still no findings, retry this often so results appear soon after a scan finishes (Default: 300)
+
+# -----------------------------------------------------------------------------
+# Low-resource preset (e.g. Raspberry Pi). Uncomment this block to run light.
+# The portscanner is the lightweight core; the OWASP ZAP web scanner is by far
+# the heaviest component (a Java daemon + crawling/attacking), so keep it in
+# passive mode (or disabled) on small devices.
+# -----------------------------------------------------------------------------
+#nmap_scripts = vuln                          # keep a single vuln script, not the heavier sets
+#portscanner_max_parallel_workers = 1         # avoid parallel nmap on few cores
+#zap_scan_mode = passive                      # no active attacking; spider + passive only
+#zap_spider_max_children = 5                  # shallow crawl
+#zap_spider_timeout_sec = 120                 # short spider budget
+#zap_passive_timeout_sec = 90
+#webscanner_loop_interval_sec = 86400         # scan web targets at most once a day
+#disable_webscanner = true                    # or just turn the web scanner off entirely on a Pi
+#metasploit_use_metadata_cache = false        # avoid parsing the large Metasploit metadata JSON into RAM
+#metasploit_enable_msfconsole_search = false  # and don't spawn msfconsole
+#metasploit_loop_interval_sec = 21600
+#remediation_loop_interval_sec = 21600

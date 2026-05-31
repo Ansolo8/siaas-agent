@@ -60,3 +60,19 @@ The data-transfer and internal API module list includes `platform`, `neighborhoo
   ```
 
   `openai` (or any OpenAI-compatible endpoint via `remediation_ai_api_base`) and `gemini` are configured the same way, only changing `remediation_ai_provider` and `remediation_ai_model`.
+
+### Web scanner scan modes and resource usage
+
+The OWASP ZAP web scanner is by far the heaviest component (a Java daemon plus crawling/attacking), so its weight is controlled by `zap_scan_mode`:
+
+- `passive` (default): spider the site (bounded by `zap_spider_max_children`) and run passive analysis only — it does **not** attack the target. Much lighter; suitable for a Raspberry Pi. Finds missing headers, info leaks, cookie issues, outdated components, etc.
+- `spider`: spider only.
+- `active`: spider + full active scan — attacks every discovered endpoint/parameter. This is the heavy mode and can generate thousands of requests against deliberately-vulnerable apps.
+
+Each phase has a time budget (`zap_spider_timeout_sec`, `zap_passive_timeout_sec`, `zap_ascan_timeout_sec`) after which it is stopped, so a single target cannot monopolize the host.
+
+ZAP reports one alert *instance* per URL/parameter. The scanner deduplicates these into unique findings (what the detail table shows) while recording `instances` and a few `example_urls` per finding. Stats expose both `total_num_vulnerabilities` (unique) and `total_num_instances` (raw), so a count like "19 findings across 1138 instances" is no longer contradictory.
+
+### Running light (Raspberry Pi)
+
+`conf/siaas_agent.cnf.orig` ships a commented **low-resource preset**. In short: keep the portscanner (the lightweight core), run the web scanner in `passive` mode with a shallow spider (or disable it), lengthen the loop intervals, and on very small devices set `metasploit_use_metadata_cache = false` so the large Metasploit metadata JSON is not parsed into RAM.
