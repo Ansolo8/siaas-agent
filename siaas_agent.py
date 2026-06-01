@@ -33,6 +33,7 @@ if __name__ == "__main__":
     import aiaavsraw_webscanner #webscanner added
     import siaas_metasploit
     import siaas_remediation
+    import siaas_audit
 
     print('\n')
 
@@ -113,6 +114,7 @@ if __name__ == "__main__":
     webscanner = Process(target=aiaavsraw_webscanner.loop, args=()) #added webscanner
     metasploit = Process(target=siaas_metasploit.loop, args=())
     remediation = Process(target=siaas_remediation.loop, args=())
+    audit = Process(target=siaas_audit.loop, args=())
 
     platform.start()
     # give the platform module some seconds to grab system info
@@ -125,6 +127,7 @@ if __name__ == "__main__":
     webscanner.start() #added webscanner
     metasploit.start()
     remediation.start()
+    audit.start()
 
     # give the modules some time to start before launching the local API
     time.sleep(5)
@@ -144,5 +147,6 @@ if __name__ == "__main__":
     webscanner.join() #webscanner added
     metasploit.join()
     remediation.join()
+    audit.join()
 
 sys.exit(0)
