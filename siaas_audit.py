@@ -148,6 +148,12 @@ def _risk_label(score):
 def compute_host_metrics(portscanner_hosts, metasploit_db, remediation_plan):
     """
     Returns a list of per-host metric dicts, sorted by risk score descending.
+
+    Portscanner DB layout (per host):
+        data["system_info"] (os_family etc.)
+        data["scanned_ports"][port]["scan_results"] (nmap script output, scanned for CVEs)
+    Severity counts are derived from the remediation findings overlay (which already
+    classify each finding), since nmap raw output has no structured severity field.
     """
     host_metrics = {}
 
@@ -159,21 +165,12 @@ def compute_host_metrics(portscanner_hosts, metasploit_db, remediation_plan):
         cves = set()
         severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "unknown": 0}
 
-        for port_key, port_data in data.items():
+        for port_key, port_data in (data.get("scanned_ports", {}) or {}).items():
             if not isinstance(port_data, dict):
                 continue
             ports.append(port_key)
-            for cve in _extract_cves(port_data):
+            for cve in _extract_cves(port_data.get("scan_results", {})):
                 cves.add(cve)
-            # nmap script output can carry severity hints
-            scripts = port_data.get("scripts", {}) or {}
-            for script_name, script_data in scripts.items():
-                sev = "unknown"
-                if isinstance(script_data, dict):
-                    sev = script_data.get("severity", "unknown").lower()
-                    if sev not in severity_counts:
-                        sev = "unknown"
-                severity_counts[sev] += 1
 
         os_family = data.get("system_info", {}).get("os_family", "") or data.get("os_family", "")
         host_metrics[host] = {
@@ -192,7 +189,8 @@ def compute_host_metrics(portscanner_hosts, metasploit_db, remediation_plan):
         }
 
     # --- metasploit overlay ---
-    for host, msf_data in metasploit_db.items():
+    # Metasploit DB layout: metasploit_db["targets"][host]["services"][port]["metasploit_modules"]
+    for host, host_entry in (metasploit_db.get("targets", {}) or {}).items():
         if host not in host_metrics:
             host_metrics[host] = {
                 "host": host,
@@ -209,19 +207,26 @@ def compute_host_metrics(portscanner_hosts, metasploit_db, remediation_plan):
                 "risk_level": "info",
             }
         modules = []
-        if isinstance(msf_data, dict):
-            for port_key, port_data in msf_data.items():
-                if isinstance(port_data, dict):
-                    for m in port_data.get("metasploit_modules", []):
-                        modules.append(m.get("name", str(m)))
+        if isinstance(host_entry, dict):
+            for port_key, svc in (host_entry.get("services", {}) or {}).items():
+                if isinstance(svc, dict):
+                    for m in svc.get("metasploit_modules", []):
+                        # Each module descriptor uses the "module" key (see siaas_metasploit).
+                        modules.append(m.get("module", m.get("name", str(m))) if isinstance(m, dict) else str(m))
         if modules:
             host_metrics[host]["exploitable"] = True
             host_metrics[host]["metasploit_modules"] = modules
 
     # --- remediation overlay ---
+    # Remediation findings already carry a classified severity, so use them as the
+    # authoritative source for each host's severity_counts.
     for finding in remediation_plan:
         target = finding.get("target", "")
         if target in host_metrics:
+            sev = (finding.get("severity") or "unknown").lower()
+            if sev not in host_metrics[target]["severity_counts"]:
+                sev = "unknown"
+            host_metrics[target]["severity_counts"][sev] += 1
             host_metrics[target]["remediation_findings"].append({
                 "id": finding.get("id", ""),
                 "severity": finding.get("severity", "unknown"),
@@ -249,7 +254,13 @@ def compute_host_metrics(portscanner_hosts, metasploit_db, remediation_plan):
 
 
 def compute_web_metrics(webscanner_targets):
-    """Returns a list of per-target web metric dicts, sorted by risk score."""
+    """
+    Returns a list of per-target web metric dicts, sorted by risk score.
+
+    Webscanner DB layout (per target):
+        data["stats"]["total_num_vulnerabilities"|"total_num_instances"|"total_num_exploits"]
+        data["scanned_ports"][port]["scan_results"]["zap_scan"]["vuln"][vuln_id]["severity"]
+    """
     results = []
     for entry in webscanner_targets:
         target = entry["target"]
@@ -257,15 +268,25 @@ def compute_web_metrics(webscanner_targets):
         stats = data.get("stats", {}) or {}
         unique = stats.get("total_num_vulnerabilities", 0)
         instances = stats.get("total_num_instances", 0)
-        high = stats.get("total_num_high_vulnerabilities", 0)
+        # The webscanner counts high-severity findings under "total_num_exploits".
+        high = stats.get("total_num_exploits", 0)
 
         sev_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "unknown": 0}
-        zap_scan = data.get("zap_scan", {}) or {}
-        for finding in zap_scan.get("findings", []):
-            sev = (finding.get("severity") or "unknown").lower()
-            if sev not in sev_counts:
-                sev = "unknown"
-            sev_counts[sev] += 1
+        scan_mode = "unknown"
+        # Walk every scanned port -> scan_results. In scan_results the "zap_scan" key
+        # maps directly to the ZAP content (scan_mode, vuln dict), so no extra nesting.
+        for port_proto, port_data in (data.get("scanned_ports", {}) or {}).items():
+            if not isinstance(port_data, dict):
+                continue
+            for scan_name, zap_scan in (port_data.get("scan_results", {}) or {}).items():
+                if not isinstance(zap_scan, dict):
+                    continue
+                scan_mode = zap_scan.get("scan_mode", scan_mode)
+                for vuln_id, vuln in (zap_scan.get("vuln", {}) or {}).items():
+                    sev = (vuln.get("severity") or "unknown").lower()
+                    if sev not in sev_counts:
+                        sev = "unknown"
+                    sev_counts[sev] += 1
 
         score = (
             sev_counts.get("critical", 0) * 100 +
@@ -279,7 +300,7 @@ def compute_web_metrics(webscanner_targets):
             "total_instances": instances,
             "high_findings": high,
             "severity_counts": sev_counts,
-            "scan_mode": zap_scan.get("scan_mode", "unknown"),
+            "scan_mode": scan_mode,
             "risk_score": score,
             "risk_level": _risk_label(min(score, 100)),
         })
@@ -576,20 +597,35 @@ def _deterministic_narrative(org_metrics, host_metrics, web_metrics):
 
 def build_report():
     start_time = time.time()
+    logger.info("Security audit starting: aggregating all scanner module outputs ...")
 
     portscanner_hosts = _collect_portscanner()
     webscanner_targets = _collect_webscanner()
     metasploit_db = _collect_metasploit()
     remediation_plan = _collect_remediation()
+    logger.info("Audit input — portscanner hosts: %s, webscanner targets: %s, metasploit hosts: %s, remediation findings: %s",
+                len(portscanner_hosts), len(webscanner_targets), len(metasploit_db), len(remediation_plan))
+
+    if not portscanner_hosts and not webscanner_targets:
+        logger.warning("No host or web data available yet. The other scanner modules have likely "
+                       "not produced var/portscanner.db or var/webscanner.db yet; the audit will "
+                       "retry on the fast interval until data appears.")
 
     host_metrics = compute_host_metrics(portscanner_hosts, metasploit_db, remediation_plan)
     web_metrics  = compute_web_metrics(webscanner_targets)
     org_metrics  = compute_org_metrics(host_metrics, web_metrics, remediation_plan)
+    logger.info("Computed metrics — org risk: %s (score %s); %s exploitable host(s), %s unique CVE(s)",
+                org_metrics["org_risk_level"], org_metrics["org_risk_score"],
+                org_metrics["exploitable_hosts"], org_metrics["total_unique_cves"])
 
     existing_report = siaas_aux.read_from_local_file(AUDIT_DB) or {}
 
     narrative, ai_sig, ai_enabled = generate_ai_narrative(org_metrics, host_metrics, web_metrics, existing_report)
     if narrative is None:
+        if ai_enabled:
+            logger.warning("AI narrative unavailable; using deterministic local-rules narrative instead.")
+        else:
+            logger.info("AI narrative disabled (audit_ai_provider=local_rules); using deterministic narrative.")
         narrative = _deterministic_narrative(org_metrics, host_metrics, web_metrics)
         narrative_source = "local_rules"
         ai_error = existing_report.get("ai_error") if ai_enabled else None

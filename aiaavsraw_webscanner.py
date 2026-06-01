@@ -446,6 +446,7 @@ def run_zap_scan(url, timeout=1800):
         return {
             "@generated": siaas_aux.get_now_utc_str(),
             "@version": "2.11.1",
+            "scan_mode": mode,
             "site": [{
                 "@name": url,
                 "@host": urlparse(url).hostname or urlparse(url).netloc,
@@ -508,6 +509,7 @@ def parse_zap_report(report, url):
         scan_results["zap_scan"] = {
             "response_code": 0,
             "content_length": 0,
+            "scan_mode": (report or {}).get("scan_mode", "unknown"),
             "num_unique": 0,
             "num_instances": 0,
             "vuln": {}
@@ -555,6 +557,7 @@ def parse_zap_report(report, url):
     scan_results["zap_scan"] = {
         "response_code": 200,  # Placeholder
         "content_length": 0,   # Placeholder
+        "scan_mode": report.get("scan_mode", "unknown"),
         "num_unique": total_vulns,
         "num_instances": total_instances,
         "vuln": vuln_dict
