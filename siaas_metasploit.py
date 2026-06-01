@@ -623,7 +623,8 @@ def loop():
         else:
             sleep_time = _config_int("metasploit_loop_interval_sec", 3600)
         logger.debug("Sleeping for %s seconds before next Metasploit assistant loop ...", sleep_time)
-        time.sleep(sleep_time)
+        if siaas_aux.interruptible_sleep("metasploit", sleep_time):
+            logger.info("Metasploit module woke up early due to a manual run trigger.")
 
 
 if __name__ == "__main__":

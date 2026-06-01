@@ -15,6 +15,7 @@ import uuid
 import os
 import sys
 import re
+import time
 import requests
 import urllib3
 import json
@@ -275,6 +276,83 @@ def read_from_local_file(file_to_read):
         logger.error("There was an error while reading from local file " +
                      file_to_read+": "+str(e))
         return None
+
+
+# -----------------------------------------------------------------------------
+# Manual "Run now" triggers
+#
+# Modules normally run on their own timed loops. To let an operator (or the GUI)
+# force an immediate run, the internal API drops a small trigger file in var/
+# named "trigger_<module>". Each module's loop checks for its trigger and, if it
+# exists, clears it and runs immediately instead of waiting for the next cycle.
+# -----------------------------------------------------------------------------
+
+VALID_TRIGGER_MODULES = ["portscanner", "webscanner",
+                         "metasploit", "remediation", "audit"]
+
+
+def get_trigger_file_path(module):
+    """Returns the absolute path of a module's manual-run trigger file."""
+    return os.path.join(sys.path[0], "var", "trigger_" + str(module))
+
+
+def create_module_trigger(module):
+    """
+    Creates a manual-run trigger file for the given module so its loop runs at
+    once on the next check. Returns True on success, False otherwise.
+    """
+    if module not in VALID_TRIGGER_MODULES:
+        logger.error("Refusing to create trigger for unknown module: " + str(module))
+        return False
+    try:
+        os.makedirs(os.path.join(sys.path[0], "var"), exist_ok=True)
+        with open(get_trigger_file_path(module), "w") as handle:
+            handle.write(get_now_utc_str())
+        logger.info("Manual run trigger created for module '" + module + "'.")
+        return True
+    except Exception as e:
+        logger.error("Could not create trigger for module '" +
+                     str(module) + "': " + str(e))
+        return False
+
+
+def consume_module_trigger(module):
+    """
+    Returns True if a manual-run trigger exists for the module, deleting it so it
+    only fires once. Returns False if there is no pending trigger.
+    """
+    path = get_trigger_file_path(module)
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            logger.info("Manual run trigger consumed for module '" + module + "'.")
+            return True
+    except Exception as e:
+        logger.error("Could not consume trigger for module '" +
+                     str(module) + "': " + str(e))
+    return False
+
+
+def interruptible_sleep(module, total_seconds, poll_interval=2):
+    """
+    Sleeps up to total_seconds, but wakes early (returns True) as soon as a
+    manual-run trigger appears for the module. The trigger is consumed on wake so
+    the next loop iteration runs exactly once. Returns False on a normal timeout.
+    """
+    try:
+        total_seconds = int(total_seconds)
+    except Exception:
+        total_seconds = 0
+    elapsed = 0
+    while elapsed < total_seconds:
+        if consume_module_trigger(module):
+            return True
+        nap = min(poll_interval, total_seconds - elapsed)
+        if nap <= 0:
+            break
+        time.sleep(nap)
+        elapsed += nap
+    return False
 
 
 def get_or_create_unique_system_id():

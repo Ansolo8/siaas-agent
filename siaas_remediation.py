@@ -537,7 +537,8 @@ def loop():
         else:
             sleep_time = _config_int("remediation_loop_interval_sec", 3600)
         logger.debug("Sleeping for %s seconds before next remediation advisor loop ...", sleep_time)
-        time.sleep(sleep_time)
+        if siaas_aux.interruptible_sleep("remediation", sleep_time):
+            logger.info("Remediation module woke up early due to a manual run trigger.")
 
 
 if __name__ == "__main__":

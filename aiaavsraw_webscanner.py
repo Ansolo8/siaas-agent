@@ -925,7 +925,8 @@ def loop():
             sleep_time = 21600  # 6 hours default
         
         logger.info(f"Web scanner sleeping for {sleep_time} seconds")
-        time.sleep(sleep_time)
+        if siaas_aux.interruptible_sleep("webscanner", sleep_time):
+            logger.info("Web scanner woke up early due to a manual run trigger.")
 
 
 # --------------------------------------------------

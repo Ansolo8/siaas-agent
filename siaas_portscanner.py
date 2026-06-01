@@ -516,11 +516,13 @@ def loop():
                 config_name="portscanner_loop_interval_sec"))
             logger.debug("Sleeping for "+str(sleep_time) +
                          " seconds before next loop ...")
-            time.sleep(sleep_time)
+            if siaas_aux.interruptible_sleep("portscanner", sleep_time):
+                logger.info("Port scanner woke up early due to a manual run trigger.")
         except:
             logger.debug(
                 "The interval loop time is not configured or is invalid. Sleeping now for 1 day by default ...")
-            time.sleep(86400)
+            if siaas_aux.interruptible_sleep("portscanner", 86400):
+                logger.info("Port scanner woke up early due to a manual run trigger.")
 
 
 if __name__ == "__main__":

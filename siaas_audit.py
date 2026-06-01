@@ -698,7 +698,8 @@ def loop():
             sleep_time = _config_int("audit_loop_interval_sec", 3600)
 
         logger.debug("Sleeping for %s seconds before next audit loop ...", sleep_time)
-        time.sleep(sleep_time)
+        if siaas_aux.interruptible_sleep("audit", sleep_time):
+            logger.info("Audit module woke up early due to a manual run trigger.")
 
 
 if __name__ == "__main__":

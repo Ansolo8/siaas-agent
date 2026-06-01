@@ -79,6 +79,29 @@ audit_ai_model = llama-3.1-8b-instant
 
 The AI narrative is cached by a signature of the current metrics, so unchanged scan results do not trigger a new API call. If the AI call fails, the deterministic narrative is saved instead with an `ai_error` field.
 
+### Manual "Run now" module triggers
+
+The `portscanner`, `webscanner`, `metasploit`, `remediation`, and `audit` modules normally run on their own timed loops. To run one on demand (e.g. from a GUI button), the internal agent API exposes:
+
+```
+POST /siaas-agent/trigger/<module>
+```
+
+This drops a `var/trigger_<module>` file; the module's loop detects it (within a couple of seconds), consumes it, and runs once immediately instead of waiting for its next interval. The internal API must be enabled for this to work:
+
+```ini
+enable_internal_api = true   # exposes the agent API on port 5001
+```
+
+Example:
+
+```bash
+curl -X POST http://<agent-host>:5001/siaas-agent/trigger/audit
+# {"output": {"module": "audit", "message": "Manual run triggered..."}, "status": "success", ...}
+```
+
+Each module's loop uses an interruptible sleep, so the trigger takes effect almost immediately even when a long loop interval is configured. Stale trigger files are cleared on agent startup.
+
 ### Web scanner scan modes and resource usage
 
 The OWASP ZAP web scanner is by far the heaviest component (a Java daemon plus crawling/attacking), so its weight is controlled by `zap_scan_mode`:
