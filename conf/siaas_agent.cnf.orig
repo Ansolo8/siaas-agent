@@ -6,7 +6,7 @@ api_user = siaas # (Default: None)
 api_pwd = siaas # (Default: None)
 api_ssl_ignore_verify = true # (Default: false)
 api_ssl_ca_bundle = ./ssl/siaas.crt # (Default: None)
-#enable_internal_api = true # (Default: false)
+#enable_internal_api = true # exposes the local agent API on port 5001; REQUIRED for the GUI "Run now" module triggers (Default: false)
 #offline_mode = true # don't communicate with the server at all (Default: false)
 
 # Runtime configurations (can be changed during runtime from published configurations in the server)

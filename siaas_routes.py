@@ -49,7 +49,7 @@ def siaas_agent():
         ip = request.remote_addr
     ret_code = 200
     module = request.args.get('module', default='*', type=str)
-    all_existing_modules = "platform,neighborhood,portscanner,webscanner,metasploit,remediation,config" #webscanner/metasploit/remediation
+    all_existing_modules = "platform,neighborhood,portscanner,webscanner,metasploit,remediation,audit,config" #webscanner/metasploit/remediation/audit
     for m in module.split(','):
         if m.strip() == "*":
             module = all_existing_modules
@@ -74,3 +74,55 @@ def siaas_agent():
             'time': siaas_aux.get_now_utc_str()
         }
     ), ret_code
+
+
+@app.route('/siaas-agent/trigger/<module>', methods=['POST'], strict_slashes=False)
+def siaas_agent_trigger(module):
+    """
+    Agent API route - manually trigger an immediate run of a module.
+
+    The module's loop normally waits for its configured interval. This drops a
+    trigger file that makes the loop wake up and run once on its next check
+    (within a couple of seconds). Useful for an on-demand "Run now" button.
+    Triggerable modules: portscanner, webscanner, metasploit, remediation, audit.
+    """
+    module = (module or "").strip().lower()
+    if module not in siaas_aux.VALID_TRIGGER_MODULES:
+        return jsonify(
+            {
+                'output': {
+                    'module': module,
+                    'message': 'Unknown or non-triggerable module.',
+                    'triggerable_modules': siaas_aux.VALID_TRIGGER_MODULES,
+                },
+                'status': 'failure',
+                'total_entries': 0,
+                'time': siaas_aux.get_now_utc_str()
+            }
+        ), 400
+
+    ok = siaas_aux.create_module_trigger(module)
+    if ok:
+        return jsonify(
+            {
+                'output': {
+                    'module': module,
+                    'message': "Manual run triggered. The module will run within a few seconds.",
+                },
+                'status': 'success',
+                'total_entries': 1,
+                'time': siaas_aux.get_now_utc_str()
+            }
+        ), 202
+
+    return jsonify(
+        {
+            'output': {
+                'module': module,
+                'message': 'Could not create the trigger file.',
+            },
+            'status': 'failure',
+            'total_entries': 0,
+            'time': siaas_aux.get_now_utc_str()
+        }
+    ), 500
