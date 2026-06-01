@@ -192,6 +192,35 @@ def _validate_ai_result(ai_result):
     return ai_result
 
 
+def _post_with_retry(url, timeout, max_retries=4, **kwargs):
+    """
+    POST helper that tolerates HTTP 429 (rate limit) from hosted AI providers
+    like Groq. On a 429 it honors the provider's Retry-After header when present,
+    otherwise uses exponential backoff (2, 4, 8, 16s, capped), and retries up to
+    max_retries times before giving up. This lets every finding eventually get an
+    AI answer instead of falling back to local rules just because of a burst.
+    """
+    attempt = 0
+    while True:
+        response = requests.post(url, timeout=timeout, **kwargs)
+        if response.status_code != 429:
+            response.raise_for_status()
+            return response
+        attempt += 1
+        if attempt > max_retries:
+            # Out of retries: raise the 429 so the caller keeps the rule-based answer.
+            response.raise_for_status()
+        retry_after = response.headers.get("Retry-After", "")
+        try:
+            wait = float(retry_after)
+        except (TypeError, ValueError):
+            wait = min(2 ** attempt, 16)
+        logger.warning(
+            "AI provider rate-limited (HTTP 429); waiting %.1fs then retrying (attempt %s/%s) ...",
+            wait, attempt, max_retries)
+        time.sleep(wait)
+
+
 def ollama_remediation(finding, api_url, model, timeout):
     payload = {
         "model": model,
@@ -206,7 +235,7 @@ def ollama_remediation(finding, api_url, model, timeout):
     return _validate_ai_result(_extract_json_object(model_text))
 
 
-def openai_compatible_remediation(finding, api_base, model, api_key, timeout):
+def openai_compatible_remediation(finding, api_base, model, api_key, timeout, max_retries=4):
     """
     Works with any OpenAI-compatible chat completions endpoint: Groq, OpenAI,
     OpenRouter, Mistral, Together, etc. Most offer a free tier.
@@ -223,13 +252,13 @@ def openai_compatible_remediation(finding, api_base, model, api_key, timeout):
         "response_format": {"type": "json_object"},
     }
     headers = {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"}
-    response = requests.post(api_base.rstrip("/") + "/chat/completions", json=payload, headers=headers, timeout=timeout)
-    response.raise_for_status()
+    response = _post_with_retry(api_base.rstrip("/") + "/chat/completions", timeout,
+                                max_retries=max_retries, json=payload, headers=headers)
     model_text = response.json()["choices"][0]["message"]["content"]
     return _validate_ai_result(_extract_json_object(model_text))
 
 
-def gemini_remediation(finding, api_base, model, api_key, timeout):
+def gemini_remediation(finding, api_base, model, api_key, timeout, max_retries=4):
     if not api_key:
         raise ValueError("missing API key (set the env var named by remediation_ai_api_key_env)")
     url = api_base.rstrip("/") + "/models/" + model + ":generateContent?key=" + api_key
@@ -238,8 +267,7 @@ def gemini_remediation(finding, api_base, model, api_key, timeout):
         "contents": [{"parts": [{"text": build_user_content(finding)}]}],
         "generationConfig": {"temperature": 0.2, "response_mime_type": "application/json"},
     }
-    response = requests.post(url, json=payload, timeout=timeout)
-    response.raise_for_status()
+    response = _post_with_retry(url, timeout, max_retries=max_retries, json=payload)
     model_text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
     return _validate_ai_result(_extract_json_object(model_text))
 
@@ -253,16 +281,16 @@ def _resolve_api_key():
     return key
 
 
-def _call_provider(provider, finding, model, timeout):
+def _call_provider(provider, finding, model, timeout, max_retries=4):
     if provider == "ollama":
         api_url = _config_string("remediation_ollama_api_url", "http://127.0.0.1:11434")
         return ollama_remediation(finding, api_url, model, timeout)
     if provider in ("groq", "openai"):
         api_base = _config_string("remediation_ai_api_base", PROVIDER_DEFAULTS[provider]["api_base"])
-        return openai_compatible_remediation(finding, api_base, model, _resolve_api_key(), timeout)
+        return openai_compatible_remediation(finding, api_base, model, _resolve_api_key(), timeout, max_retries=max_retries)
     if provider == "gemini":
         api_base = _config_string("remediation_ai_api_base", PROVIDER_DEFAULTS["gemini"]["api_base"])
-        return gemini_remediation(finding, api_base, model, _resolve_api_key(), timeout)
+        return gemini_remediation(finding, api_base, model, _resolve_api_key(), timeout, max_retries=max_retries)
     raise ValueError("unsupported remediation_ai_provider: " + provider)
 
 
@@ -285,8 +313,15 @@ def enrich_with_ai(remediation_plan):
     timeout = _config_int("remediation_ai_timeout_sec", 60)
     max_findings = _config_int("remediation_ai_max_findings", 20)
     cache_enabled = _config_bool("remediation_ai_cache", default=True)
-    logger.info("AI remediation enabled (provider=%s, model=%s, timeout=%ss, max_new_calls=%s, cache=%s) for %s finding(s)",
-                provider, model, timeout, max_findings, cache_enabled, len(remediation_plan))
+    # Hosted providers (Groq free tier etc.) rate-limit per minute. Space requests
+    # out and retry on 429 so every finding gets an AI answer instead of bursting
+    # and dropping half of them to local rules. Ollama is local, so no spacing.
+    max_retries = _config_int("remediation_ai_max_retries", 4)
+    default_interval = 0 if provider == "ollama" else 2
+    request_interval = _config_int("remediation_ai_request_interval_sec", default_interval)
+    logger.info("AI remediation enabled (provider=%s, model=%s, timeout=%ss, max_new_calls=%s, cache=%s, "
+                "request_interval=%ss, max_retries=%s) for %s finding(s)",
+                provider, model, timeout, max_findings, cache_enabled, request_interval, max_retries, len(remediation_plan))
     stats = {"enabled": True, "provider": provider, "model": model,
              "attempted": 0, "succeeded": 0, "failed": 0, "cached": 0}
 
@@ -305,13 +340,17 @@ def enrich_with_ai(remediation_plan):
         if calls_made >= max_findings:
             continue  # leave the rule-based recommendation in place for the overflow
 
+        # Space out calls to stay under the provider's per-minute rate limit.
+        if calls_made > 0 and request_interval > 0:
+            time.sleep(request_interval)
+
         calls_made += 1
         stats["attempted"] += 1
         logger.info("Querying %s/%s for finding %s (%s on %s %s)...",
                     provider, model, finding.get("id"), finding.get("service", "?"),
                     finding.get("target", "?"), finding.get("port", "?"))
         try:
-            ai_result = _call_provider(provider, finding, model, timeout)
+            ai_result = _call_provider(provider, finding, model, timeout, max_retries=max_retries)
             finding["ai_remediation"] = ai_result
             finding["ai_model"] = model
             finding["ai_signature"] = signature
