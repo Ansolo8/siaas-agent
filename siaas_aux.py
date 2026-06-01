@@ -290,6 +290,8 @@ def read_from_local_file(file_to_read):
 VALID_TRIGGER_MODULES = ["portscanner", "webscanner",
                          "metasploit", "remediation", "audit"]
 
+TRIGGER_HISTORY_FILE = os.path.join(sys.path[0], "var", "trigger_history.db")
+
 
 def get_trigger_file_path(module):
     """Returns the absolute path of a module's manual-run trigger file."""
@@ -331,6 +333,36 @@ def consume_module_trigger(module):
         logger.error("Could not consume trigger for module '" +
                      str(module) + "': " + str(e))
     return False
+
+
+def check_and_fire_config_triggers():
+    """
+    Called by the datatransfer loop after downloading server configs.
+    Looks for trigger_<module> keys published by the server. When a new
+    timestamp is seen for a module, creates the local trigger file so the
+    module loop wakes up. Timestamps are persisted locally so the same
+    server-side value does not re-fire on subsequent polling cycles.
+    """
+    history = read_from_local_file(TRIGGER_HISTORY_FILE) or {}
+    if not isinstance(history, dict):
+        history = {}
+
+    changed = False
+    for module in VALID_TRIGGER_MODULES:
+        ts = get_config_from_configs_db(
+            config_name="trigger_" + module, convert_to_string=True)
+        if not ts:
+            continue
+        if history.get(module) != ts:
+            logger.info(
+                "Server-published trigger received for module '%s' (ts=%s). "
+                "Creating local trigger file.", module, ts)
+            create_module_trigger(module)
+            history[module] = ts
+            changed = True
+
+    if changed:
+        write_to_local_file(TRIGGER_HISTORY_FILE, history)
 
 
 def interruptible_sleep(module, total_seconds, poll_interval=2):

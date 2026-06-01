@@ -593,12 +593,23 @@ def loop():
     siaas_aux.write_to_local_file(METASPLOIT_DB, {})
     os.chmod(METASPLOIT_DB, os.stat(METASPLOIT_DB).st_mode & ~0o007)
 
+    # This module does not run automatically on startup — it waits for a manual
+    # trigger from the GUI ("Run now" button) before its first execution.
+    # After the first run it continues on the normal loop interval automatically.
+    first_run = True
+
     while True:
         disable = siaas_aux.get_config_from_configs_db(config_name="disable_metasploit", convert_to_string=True)
         if siaas_aux.validate_bool_string(disable):
             logger.warning("Metasploit assistant is disabled as per configuration! Not running.")
             time.sleep(60)
             continue
+
+        if first_run:
+            logger.info("Metasploit assistant waiting for a manual trigger from the GUI to start the first run ...")
+            siaas_aux.interruptible_sleep("metasploit", 999999)
+            first_run = False
+            logger.info("Metasploit assistant first-run trigger received. Starting now ...")
 
         results = None
         try:

@@ -158,6 +158,9 @@ def loop():
         download_agent_configs(API_URI, ssl_ignore_verify,
                                ssl_ca_bundle, api_user, api_pwd)
 
+        # Fire any manual-run triggers published by the server (trigger_<module> = <timestamp>)
+        siaas_aux.check_and_fire_config_triggers()
+
         time.sleep(3)  # avoid flooding the API
 
         # Upload agent data

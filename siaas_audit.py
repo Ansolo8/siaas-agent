@@ -670,12 +670,23 @@ def loop():
         siaas_aux.write_to_local_file(AUDIT_DB, {})
     os.chmod(AUDIT_DB, os.stat(AUDIT_DB).st_mode & ~0o007)
 
+    # This module does not run automatically on startup — it waits for a manual
+    # trigger from the GUI ("Run now" button) before its first execution.
+    # After the first run it continues on the normal loop interval automatically.
+    first_run = True
+
     while True:
         disable = siaas_aux.get_config_from_configs_db(config_name="disable_audit", convert_to_string=True)
         if siaas_aux.validate_bool_string(disable):
             logger.warning("Security audit module is disabled as per configuration! Not running.")
             time.sleep(60)
             continue
+
+        if first_run:
+            logger.info("Security audit module waiting for a manual trigger from the GUI to start the first run ...")
+            siaas_aux.interruptible_sleep("audit", 999999)
+            first_run = False
+            logger.info("Security audit first-run trigger received. Starting now ...")
 
         report = None
         try:

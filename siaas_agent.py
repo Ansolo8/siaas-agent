@@ -57,7 +57,7 @@ if __name__ == "__main__":
     # Deleting any existing databases leftovers and stale manual-run triggers
     old_dbs = os.listdir(os.path.join(sys.path[0], 'var/'))
     for db in old_dbs:
-        if db.endswith(".db") or db.startswith("trigger_"):
+        if db.endswith(".db") or db.startswith("trigger_") or db == "trigger_history.db":
             os.remove(os.path.join(sys.path[0], 'var/'+db))
 
     # Initializing local databases for configurations
