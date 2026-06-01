@@ -71,6 +71,18 @@ nmap_scripts = vuln # if commented no nmap scanning script is run. Options: auth
 #remediation_ai_max_findings = 20 # cap *new* AI calls per remediation cycle to avoid very long loops; cached findings don't count (Default: 20)
 #remediation_initial_retry_interval_sec = 300 # while there are still no findings, retry this often so results appear soon after a scan finishes (Default: 300)
 
+# Security audit / posture summary runtime configurations (aggregates all scanner outputs)
+#disable_audit = true # don't generate the organization-level security posture report (Default: false)
+#audit_loop_interval_sec = 3600 # (Default: 3600)
+#audit_ai_provider = local_rules # options: local_rules, ollama, groq, openai, gemini (Default: local_rules)
+#audit_ai_model = llama-3.1-8b-instant # provider-specific model; same defaults as remediation_ai_model (Default: per-provider)
+#audit_ollama_api_url = http://127.0.0.1:11434 # local Ollama API, used when provider=ollama (Default: http://127.0.0.1:11434)
+#audit_ai_api_base = https://api.groq.com/openai/v1 # base URL for hosted providers; auto-set per provider if commented (Default: per-provider)
+#audit_ai_api_key_env = SIAAS_AI_API_KEY # name of the environment variable holding the hosted provider API key (Default: SIAAS_AI_API_KEY)
+#audit_ai_api_key = changeme # OPTIONAL inline key; prefer the env var above (Default: None)
+#audit_ai_timeout_sec = 60 # max seconds per model response (Default: 60)
+#audit_initial_retry_interval_sec = 300 # retry faster while scanners haven't produced data yet (Default: 300)
+
 # -----------------------------------------------------------------------------
 # Low-resource preset (e.g. Raspberry Pi). Uncomment this block to run light.
 # The portscanner is the lightweight core; the OWASP ZAP web scanner is by far

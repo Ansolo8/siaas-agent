@@ -24,13 +24,14 @@ __
 
 ## Added modules
 
-This agent can now run three optional extension modules that keep the same local JSON database and data-transfer architecture as the original SIAAS modules:
+This agent can now run four optional extension modules that keep the same local JSON database and data-transfer architecture as the original SIAAS modules:
 
 - `aiaavsraw_webscanner.py` writes OWASP ZAP web scan output to `var/webscanner.db`.
 - `siaas_metasploit.py` writes defensive Metasploit correlation output to `var/metasploit.db`. It correlates the CVEs found in scanner evidence with Metasploit exploit modules; it does **not** execute exploits or payloads. By default it uses precise CVE→module correlation read directly from Metasploit's local module metadata cache (`metasploit_use_metadata_cache=true`), filtered by the target's detected OS/platform (`metasploit_filter_by_platform=true`), and ranks candidates by module rank. A live `msfconsole search` fallback is available via `metasploit_enable_msfconsole_search=true`. If it runs before scanner DBs exist, it retries with `metasploit_no_data_retry_interval_sec` instead of waiting a full long scan interval.
 - `siaas_remediation.py` writes a remediation report to `var/remediation.db` by consuming the port scanner, web scanner, and Metasploit assistant outputs. By default it uses deterministic local rules; set `remediation_ai_provider` to a free AI backend to generate vulnerability-specific remediation text grounded in the scanner evidence. Supported providers: `ollama` (local/offline), `groq` (free hosted), `openai`/any OpenAI-compatible endpoint, and `gemini`. AI answers are cached per finding (`remediation_ai_cache=true`) so unchanged findings are not re-queried every loop.
+- `siaas_audit.py` writes an organization-level security posture report to `var/audit.db`. It aggregates the outputs of all other modules, computes deterministic metrics (per-host risk scores, CVE counts, exploitability flags, web finding counts), and then generates a narrative summary — either via the same AI providers as the remediation module (`audit_ai_provider`) or via deterministic local rules. The AI is given only facts already computed by the scanner, not raw packet data, so it synthesizes and prioritizes rather than invents findings.
 
-The data-transfer and internal API module list includes `platform`, `neighborhood`, `portscanner`, `webscanner`, `metasploit`, `remediation`, and `config`, so server-side consumers can ingest the new module outputs without changing the agent upload endpoint.
+The data-transfer and internal API module list includes `platform`, `neighborhood`, `portscanner`, `webscanner`, `metasploit`, `remediation`, `audit`, and `config`, so server-side consumers can ingest the new module outputs without changing the agent upload endpoint.
 
 ### Metasploit and AI remediation notes
 
@@ -60,6 +61,23 @@ The data-transfer and internal API module list includes `platform`, `neighborhoo
   ```
 
   `openai` (or any OpenAI-compatible endpoint via `remediation_ai_api_base`) and `gemini` are configured the same way, only changing `remediation_ai_provider` and `remediation_ai_model`.
+
+### Security audit / posture summary
+
+`siaas_audit.py` is the top-level aggregation module. It reads every other module's DB and produces a two-layer report:
+
+1. **Deterministic metrics** (always present, no AI needed): per-host risk scores, total unique CVEs, exploitable hosts (those with Metasploit candidates), open-port counts, web finding counts, and an organization-level composite risk score and level (`info` → `low` → `medium` → `high` → `critical`).
+2. **AI narrative** (optional): an executive posture summary, key risks, priority actions, positive observations, and a three-phase remediation roadmap — written from the metrics above, not invented. Uses the same provider options as the remediation module (`audit_ai_provider`).
+
+Configure it the same way as the remediation AI:
+
+```ini
+audit_ai_provider = groq
+audit_ai_model = llama-3.1-8b-instant
+# SIAAS_AI_API_KEY env var is reused automatically
+```
+
+The AI narrative is cached by a signature of the current metrics, so unchanged scan results do not trigger a new API call. If the AI call fails, the deterministic narrative is saved instead with an `ai_error` field.
 
 ### Web scanner scan modes and resource usage
 
