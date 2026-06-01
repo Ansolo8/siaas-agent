@@ -343,6 +343,7 @@ def collect_target_services():
     targets = {}
     portscanner_data = siaas_aux.read_from_local_file(PORTSCANNER_DB) or {}
     if isinstance(portscanner_data, dict):
+        logger.info("Reading portscanner DB: %s target(s) present", len(portscanner_data))
         for target, target_info in portscanner_data.items():
             target_record = targets.setdefault(target, {
                 "system_info": target_info.get("system_info", {}),
@@ -360,6 +361,7 @@ def collect_target_services():
 
     webscanner_data = siaas_aux.read_from_local_file(WEBSCANNER_DB) or {}
     if isinstance(webscanner_data, dict):
+        logger.info("Reading webscanner DB: %s target(s) present", len(webscanner_data))
         for target, target_info in webscanner_data.items():
             target_record = targets.setdefault(target, {
                 "system_info": target_info.get("system_info", {}),
@@ -379,6 +381,10 @@ def collect_target_services():
                 scanned_url = target_info.get("system_info", {}).get("scanned_url")
                 if scanned_url:
                     service_record["scanned_url"] = scanned_url
+
+    total_services = sum(len(t.get("services", {})) for t in targets.values())
+    logger.info("Collected %s target(s) with %s service(s) total for Metasploit correlation",
+                len(targets), total_services)
     return targets
 
 
@@ -387,6 +393,15 @@ def assess_service(target, port_proto, service_record, system_info=None, enable_
     evidence = service_record.get("evidence", {})
     cves = extract_cves(evidence)
     platform_tokens = target_platform_tokens(system_info)
+    service_label = service_record.get("service", "unknown")
+
+    if cves:
+        logger.info("Correlating %s %s (%s): %s CVE(s) in evidence [%s], target platform=%s",
+                    target, port_proto, service_label, len(cves), ", ".join(cves[:5]),
+                    sorted(platform_tokens) or "unknown")
+    else:
+        logger.debug("Correlating %s %s (%s): no CVEs found in scanner evidence; nothing to correlate",
+                     target, port_proto, service_label)
 
     modules = []
     matched_cves = []
@@ -400,6 +415,11 @@ def assess_service(target, port_proto, service_record, system_info=None, enable_
             cves, platform_tokens, filter_platform=filter_platform, limit=limit)
         if modules:
             correlation_method = "metadata_cache"
+            logger.info("%s %s: metadata cache matched %s module(s) for CVE(s) %s",
+                        target, port_proto, len(modules), ", ".join(matched_cves))
+        elif search_error:
+            logger.warning("%s %s: metadata correlation could not run: %s",
+                           target, port_proto, search_error)
 
     # Fallback path: live msfconsole search (CVE-first; product keyword optional).
     if not modules and enable_msf_search:
@@ -407,12 +427,24 @@ def assess_service(target, port_proto, service_record, system_info=None, enable_
             service_record.get("service", ""), service_record.get("product", ""), cves,
             product_fallback=product_fallback)
         if search_terms:
+            logger.info("%s %s: falling back to msfconsole search with terms: %s",
+                        target, port_proto, search_terms)
             modules, fallback_error = search_metasploit_modules(
                 search_terms, platform_tokens=platform_tokens, filter_platform=filter_platform,
                 timeout=timeout, limit=limit)
             if modules:
                 correlation_method = "msfconsole_search"
+                logger.info("%s %s: msfconsole search matched %s module(s)",
+                            target, port_proto, len(modules))
+            if fallback_error:
+                logger.warning("%s %s: msfconsole search reported: %s",
+                               target, port_proto, fallback_error)
             search_error = "; ".join(filter(None, [search_error, fallback_error]))
+
+    if cves and not modules:
+        logger.info("%s %s: %s CVE(s) found but no Metasploit module correlates to them "
+                    "(this is normal — not every CVE has a public module)",
+                    target, port_proto, len(cves))
 
     confidence = "high" if cves and modules else "medium" if cves or modules else "low"
     if modules:
@@ -475,9 +507,16 @@ def main():
     if max_workers < 1:
         max_workers = 1
 
+    logger.info(
+        "Metasploit correlation starting (metadata_cache=%s, platform_filter=%s, "
+        "msfconsole_fallback=%s, product_fallback=%s, max_workers=%s, result_limit=%s)",
+        use_metadata, filter_platform, enable_msf_search, product_fallback, max_workers, limit)
+
     metadata_status = ""
     if use_metadata:
         _, metadata_status = load_metadata_index()
+        if _METADATA_INDEX is None:
+            logger.warning("Metasploit metadata cache unavailable: %s", metadata_status)
 
     targets = collect_target_services()
     output = {
@@ -522,6 +561,11 @@ def main():
             output["stats"]["num_candidate_modules"] += len(assessed.get("metasploit_modules", []))
 
     output["stats"]["time_taken_sec"] = int(time.time() - start_time)
+    logger.info(
+        "Metasploit correlation ended: %s target(s), %s service(s) assessed, %s candidate module(s) found. "
+        "Elapsed time: %s seconds",
+        output["stats"]["num_targets"], output["stats"]["num_services"],
+        output["stats"]["num_candidate_modules"], output["stats"]["time_taken_sec"])
     if use_metadata and (_METADATA_INDEX is None):
         output["operator_note"] = (
             "Metasploit metadata cache could not be loaded (" + str(metadata_status) + "). "

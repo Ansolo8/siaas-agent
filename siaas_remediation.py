@@ -274,14 +274,19 @@ def _ai_signature(provider, model, finding):
 def enrich_with_ai(remediation_plan):
     provider = _config_string("remediation_ai_provider", "local_rules").lower().strip()
     if provider in ["", "none", "local_rules", "rules"]:
+        logger.info("AI remediation disabled (remediation_ai_provider=local_rules); using deterministic rules for %s finding(s)", len(remediation_plan))
         return remediation_plan, {"enabled": False, "provider": "local_rules"}
     if provider not in PROVIDER_DEFAULTS:
+        logger.warning("Unsupported remediation_ai_provider '%s'; falling back to local rules. Supported: %s",
+                       provider, ", ".join(PROVIDER_DEFAULTS.keys()))
         return remediation_plan, {"enabled": False, "provider": provider, "error": "unsupported remediation_ai_provider"}
 
     model = _config_string("remediation_ai_model", PROVIDER_DEFAULTS[provider]["model"])
     timeout = _config_int("remediation_ai_timeout_sec", 60)
     max_findings = _config_int("remediation_ai_max_findings", 20)
     cache_enabled = _config_bool("remediation_ai_cache", default=True)
+    logger.info("AI remediation enabled (provider=%s, model=%s, timeout=%ss, max_new_calls=%s, cache=%s) for %s finding(s)",
+                provider, model, timeout, max_findings, cache_enabled, len(remediation_plan))
     stats = {"enabled": True, "provider": provider, "model": model,
              "attempted": 0, "succeeded": 0, "failed": 0, "cached": 0}
 
@@ -302,6 +307,9 @@ def enrich_with_ai(remediation_plan):
 
         calls_made += 1
         stats["attempted"] += 1
+        logger.info("Querying %s/%s for finding %s (%s on %s %s)...",
+                    provider, model, finding.get("id"), finding.get("service", "?"),
+                    finding.get("target", "?"), finding.get("port", "?"))
         try:
             ai_result = _call_provider(provider, finding, model, timeout)
             finding["ai_remediation"] = ai_result
@@ -311,11 +319,16 @@ def enrich_with_ai(remediation_plan):
             if ai_result.get("remediation_steps"):
                 finding["recommendation"] = " ".join(str(step) for step in ai_result["remediation_steps"][:5])
             stats["succeeded"] += 1
+            logger.info("AI remediation succeeded for finding %s", finding.get("id"))
         except Exception as exc:
             finding["ai_error"] = str(exc)
             finding.pop("ai_signature", None)
             stats["failed"] += 1
-            logger.warning("AI remediation failed for finding %s: %s", finding.get("id"), exc)
+            logger.warning("AI remediation failed for finding %s: %s (kept rule-based recommendation)",
+                           finding.get("id"), exc)
+
+    logger.info("AI remediation finished: %s attempted, %s succeeded, %s failed, %s reused from cache",
+                stats["attempted"], stats["succeeded"], stats["failed"], stats["cached"])
     return remediation_plan, stats
 
 
@@ -443,13 +456,24 @@ def collect_metasploit_findings():
 
 def build_report():
     start_time = time.time()
+    logger.info("Remediation advisor starting: collecting findings from scanner DBs ...")
     existing = siaas_aux.read_from_local_file(REMEDIATION_DB) or {}
-    findings = collect_portscanner_findings() + collect_webscanner_findings() + collect_metasploit_findings()
+    ps_findings = collect_portscanner_findings()
+    web_findings = collect_webscanner_findings()
+    msf_findings = collect_metasploit_findings()
+    logger.info("Collected findings — portscanner: %s, webscanner: %s, metasploit: %s",
+                len(ps_findings), len(web_findings), len(msf_findings))
+    findings = ps_findings + web_findings + msf_findings
+    if not findings:
+        logger.warning("No findings collected from any scanner. Either the scanners have not finished "
+                       "their first run yet (var/portscanner.db / var/webscanner.db / var/metasploit.db "
+                       "empty), or no vulnerabilities were detected.")
     deduped = {}
     for finding in findings:
         current = deduped.get(finding["id"])
         if current is None or finding.get("score", 0) > current.get("score", 0):
             deduped[finding["id"]] = finding
+    logger.info("Deduplicated %s raw finding(s) into %s unique finding(s)", len(findings), len(deduped))
 
     remediation_plan = [merge_state(existing, finding) for finding in deduped.values()]
     remediation_plan.sort(key=lambda item: (-item.get("score", 0), item.get("target", ""), item.get("port", "")))
@@ -480,6 +504,8 @@ def build_report():
         },
         "last_check": siaas_aux.get_now_utc_str(),
     }
+    logger.info("Remediation advisor ended: %s finding(s) in report (mode=%s, severity=%s). Elapsed time: %s seconds",
+                len(remediation_plan), report["module_mode"], counts, report["stats"]["time_taken_sec"])
     return report
 
 
