@@ -30,7 +30,7 @@ if __name__ == "__main__":
     import siaas_platform
     import siaas_portscanner
     import siaas_routes
-    import aiaavsraw_webscanner #webscanner added
+    import siaas_webscanner #webscanner added
     import siaas_metasploit
     import siaas_remediation
     import siaas_audit
@@ -111,7 +111,7 @@ if __name__ == "__main__":
     neighborhood = Process(target=siaas_neighborhood.loop, args=())
     portscanner = Process(target=siaas_portscanner.loop, args=())
     datatransfer = Process(target=siaas_datatransfer.loop, args=())
-    webscanner = Process(target=aiaavsraw_webscanner.loop, args=()) #added webscanner
+    webscanner = Process(target=siaas_webscanner.loop, args=()) #added webscanner
     metasploit = Process(target=siaas_metasploit.loop, args=())
     remediation = Process(target=siaas_remediation.loop, args=())
     audit = Process(target=siaas_audit.loop, args=())
