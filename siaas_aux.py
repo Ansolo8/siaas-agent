@@ -267,10 +267,18 @@ def read_from_local_file(file_to_read):
     try:
         with open(file_to_read, 'r') as file:
             content = file.read()
+            # Files are written with json.dumps (see write_to_local_file), so JSON
+            # is the correct inverse. eval() cannot parse JSON literals true/false/
+            # null and would silently fall through, returning the raw string and
+            # breaking every downstream .get()/.items() call. Try JSON first, then
+            # fall back to eval for any legacy Python-repr files.
             try:
-                content = eval(content)
-            except:
-                pass
+                content = json.loads(content)
+            except Exception:
+                try:
+                    content = eval(content)
+                except Exception:
+                    pass
             return content
     except Exception as e:
         logger.error("There was an error while reading from local file " +
