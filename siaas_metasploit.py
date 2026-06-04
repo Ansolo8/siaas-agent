@@ -39,6 +39,9 @@ DEFAULT_METADATA_PATHS = [
     "/root/.msf4/store/modules_metadata_base.json",
     "/opt/metasploit-framework/embedded/framework/db/modules_metadata_base.json",
     "/usr/share/metasploit-framework/db/modules_metadata_base.json",
+    # snap install: 'current' is a symlink the snap keeps pointing at the active
+    # revision, so it survives metasploit-framework snap updates.
+    "/snap/metasploit-framework/current/opt/metasploit-framework/embedded/framework/db/modules_metadata_base.json",
 ]
 
 # Module-level cache so the (large) metadata file is parsed once and only
