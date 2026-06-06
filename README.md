@@ -6,6 +6,8 @@ In the context of the MSc in Telecommunications and Computer Engineering, at ISC
 
 By João Pedro Seara, supervised by teacher Carlos Serrão (PhD), 2022-2024
 
+Extended by Duarte Valente and João Gordicho, supervised by teacher Carlos Serrão (PhD), 2025-2026
+
 __
 
 ## System requirements
@@ -17,6 +19,7 @@ The table below shows which extra components are needed beyond the base Python e
 | **Python 3.8+** | All modules | auto (apt) | |
 | **Nmap 7.80+** | PortScanner | auto (apt) | |
 | **Docker** | WebScanner | auto (Docker CE via apt) | The ZAP image (`ghcr.io/zaproxy/zaproxy:stable`) is pulled automatically on the first web scan |
+| **ZAP API key** *(optional)* | WebScanner | set in `conf/siaas_agent.cnf` | Only needed if you configured the ZAP daemon with an API key. Set `zap_api_key = <your-key>` in `conf/siaas_agent.cnf`; leave commented if the daemon runs without authentication (default) |
 | **Metasploit Framework** | Metasploit module | auto (snap) | After install, run `msfconsole` once as the agent user to generate the module metadata cache (`~/.msf4/store/modules_metadata_base.json`). If installed via snap, the metadata file is already present at `/snap/metasploit-framework/current/opt/metasploit-framework/embedded/framework/db/modules_metadata_base.json` and no extra step is needed |
 | **Groq API key** *(optional)* | Remediation / Audit (AI) | [console.groq.com](https://console.groq.com) — free tier | Set `export SIAAS_AI_API_KEY="your-key"` in the agent's environment (e.g. the systemd unit drop-in). Configure `remediation_ai_provider = groq` and `audit_ai_provider = groq` in `conf/siaas_agent.cnf` |
 | **Ollama** *(optional)* | Remediation / Audit (AI, local/offline) | [ollama.com](https://ollama.com) — `curl -fsSL https://ollama.com/install.sh \| sh` | After install: `ollama pull llama3.1:8b`. Configure `remediation_ai_provider = ollama` in `conf/siaas_agent.cnf`. No API key needed, fully offline |
