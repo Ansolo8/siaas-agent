@@ -16,6 +16,42 @@ cd ${SCRIPT_DIR}
 apt-get update
 apt-get install -y python3 python3-pip python3-venv git nmap dmidecode ca-certificates || exit 1
 
+# DOCKER (required for the WebScanner module — OWASP ZAP runs as a Docker container)
+if ! command -v docker &>/dev/null; then
+    echo "Installing Docker..."
+    apt-get install -y ca-certificates curl gnupg lsb-release
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") \
+$(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    apt-get update
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    systemctl enable --now docker
+    echo "Docker installed. The OWASP ZAP image (ghcr.io/zaproxy/zaproxy:stable) will be pulled automatically on first web scan."
+else
+    echo "Docker already installed — skipping."
+fi
+
+# METASPLOIT FRAMEWORK (required for the Metasploit correlation module)
+# Installed via snap (stable, self-updating, works on Ubuntu/Debian).
+# To use a different installation method see the README.
+if ! command -v msfconsole &>/dev/null; then
+    if command -v snap &>/dev/null; then
+        echo "Installing Metasploit Framework via snap..."
+        snap install metasploit-framework
+        echo "Metasploit installed. Run 'msfconsole' once as the agent user to generate the module metadata cache."
+    else
+        echo "WARNING: snap not available. Install Metasploit Framework manually and ensure msfconsole is in PATH."
+        echo "See: https://docs.metasploit.com/docs/using-metasploit/getting-started/nightly-installers.html"
+    fi
+else
+    echo "Metasploit already installed — skipping."
+fi
+
 # CRONTAB
 cat << EOF | tee /etc/cron.daily/siaas-agent
 #!/bin/bash
