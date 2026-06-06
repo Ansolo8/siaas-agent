@@ -6,7 +6,7 @@ In the context of the MSc in Telecommunications and Computer Engineering, at ISC
 
 By João Pedro Seara, supervised by teacher Carlos Serrão (PhD), 2022-2024
 
-Extended by Duarte Valente and João Gordicho, supervised by teacher Carlos Serrão (PhD), 2025-2026
+Extended by Duarte Valente and João Gordicho
 
 __
 
